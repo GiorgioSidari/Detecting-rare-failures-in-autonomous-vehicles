@@ -1,0 +1,11 @@
+# Ambienti virtuali
+.venv/
+venv/
+
+# File di cache di Python
+__pycache__/
+*.py[cod]
+
+# File di Build creati da setuptools
+build/
+*.egg-info/
