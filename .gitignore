@@ -1,3 +1,6 @@
+# PyCharm project metadata
+.idea/
+
 # Ambienti virtuali
 .venv/
 venv/

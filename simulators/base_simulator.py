@@ -2,16 +2,15 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 class BaseSimulator(ABC):
-    def __init__(self, initial_speed: float = 30.0, friction_coefficient: float = 0.8,
-                 detection_distance: float = 50.0, nominal_delay: float = 0.1):
+    def __init__(self, dt: float = 0.01, t_max: float = 10.0):
         """
-        Initializes the base parameters of the AV System common to all scenarios.
-        These parameters will be inherited by all child simulators.
+        Simulation config shared by all scenarios.
+        Scenario parameters (speed, friction, etc.) vary per sample and are
+        passed as a batch array to run(), not stored on the instance.
         """
-        self.initial_speed = initial_speed
-        self.friction_coefficient = friction_coefficient
-        self.detection_distance = detection_distance
-        self.nominal_delay = nominal_delay
+        self.dt = dt
+        self.t_max = t_max
+        self.T = int(t_max / dt)
 
     @abstractmethod
     def run(self, controllable_parameters: np.ndarray) -> np.ndarray:
