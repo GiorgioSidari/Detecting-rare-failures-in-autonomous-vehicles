@@ -12,3 +12,8 @@ __pycache__/
 # File di Build creati da setuptools
 build/
 *.egg-info/
+
+# Generated images from scripts
+*.png
+*.jpg
+*.jpeg
