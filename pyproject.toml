@@ -13,3 +13,6 @@ dependencies = [
     "scipy",
     "matplotlib",
 ]
+
+[tool.setuptools.packages.find]
+include = ["embedder*", "evaluation*", "simulators*"]
