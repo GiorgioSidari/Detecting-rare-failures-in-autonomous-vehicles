@@ -1,3 +1,4 @@
+import numpy as np
 from scipy.stats.qmc import LatinHypercube, scale
 
 PARAM_BOUNDS = {

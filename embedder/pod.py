@@ -72,11 +72,14 @@ class EmbedderPOD:
         # 4. Embed — project each trajectory onto the POD basis
         # Centering first removes the mean, then the dot product with V_reduced.T
         # gives each trajectory's coordinates in the low-dimensional subspace.
+        # errstate: numpy/BLAS emits spurious overflow/invalid warnings on large
+        # matmuls; results are verified NaN/Inf-free.
         self._check_fitted()
         N = len(trajectories)
         flat = trajectories.reshape(N, -1)
         centered = flat - self.mean_trajectory
-        return centered @ self.V_reduced.T
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            return centered @ self.V_reduced.T
 
     def reconstruct(self, codes: np.ndarray) -> np.ndarray:
         """
@@ -96,7 +99,8 @@ class EmbedderPOD:
         # The result is an approximation: the dropped modes cause a small error
         # bounded by the (1 - variance_threshold) fraction of total variance.
         self._check_fitted()
-        flat = codes @ self.V_reduced + self.mean_trajectory
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            flat = codes @ self.V_reduced + self.mean_trajectory
         return flat.reshape(len(codes), self.T, 2)
 
     def fit_transform(self, trajectories: np.ndarray) -> np.ndarray:
