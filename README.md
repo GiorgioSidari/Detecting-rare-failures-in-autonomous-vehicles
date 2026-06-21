@@ -1,73 +1,157 @@
 # Detecting Rare Failures in Autonomous Vehicles
 
-This project studies how rare safety-critical failures occur in autonomous vehicle emergency braking systems. The idea is to simulate the braking scenario many times under varying and stochastic conditions, figure out which combinations of parameters push the system into failure — and do it without having to run millions of simulations to find them.
+A framework for finding statistically rare, safety-critical failures in AV control systems using Latin Hypercube Sampling, neural network behavioral cloning, POD trajectory compression, and a FastAPI + browser-based frontend.
 
-## What the simulator does
+## What it does
 
-The framework is built around a generic `BaseSimulator` that any scenario can extend. The only scenario implemented so far is `EmergencyBrakingSimulator`, which models an AV approaching an obstacle and attempting an emergency stop. Each run is controlled by four parameters: the vehicle's initial speed, the road friction, how far away the obstacle was when detected, and the system's nominal reaction delay.
+The system runs N simulations of an AV scenario (Emergency Braking, Cut-In, Lane Keeping), compresses the resulting trajectories with Proper Orthogonal Decomposition, computes a safety margin for each run, and surfaces the bottom-k% worst failures as "rare failures" — the cases that not only crash, but crash hardest.
 
-On top of those, the simulator adds realistic noise: braking efficiency varies slightly on every run (modelled after ISO 26262 brake-by-wire tolerance bands), and the actual reaction delay has log-normal jitter to capture sensor/actuator stack variability. This is why results differ even with identical inputs, and why Monte Carlo sampling is needed.
+Each scenario has two modes:
+- **Physics mode** — ideal controller, deterministic physics with realistic noise
+- **NN mode** — a neural network trained via behavioral cloning drives the vehicle; its generalisation errors are the source of rare failures
 
-The output of each run is a trajectory — position and velocity at every timestep — which feeds into the evaluation pipeline.
+---
 
-## How failure is defined
+## Quick start
 
-The Quantity of Interest lives in `evaluation/qoi.py`. It computes a **safety margin** for each run: how much stopping distance was left before the obstacle (minus a 2 m buffer). A positive margin means the vehicle stopped safely; negative means it hit or overshot. The failure indicator turns that into a binary 0/1.
+### Prerequisites
 
-The simulator produces trajectories; the QoI judges them. Neither knows about the other.
+- Python ≥ 3.9
+- A virtual environment (`.venv/` or similar)
+- Docker only if you want the **Lane Keeping** scenario (opensbt-core)
 
-## Sampling the parameter space
-
-Rather than sampling parameters naively, the project uses **Latin Hypercube Sampling** (LHS) to cover the 4D parameter space efficiently. The bounds and the sampler live in `evaluation/param_space.py` and are shared across all scripts, so every experiment draws from the same well-calibrated region.
-
-## Validation
-
-Before doing anything more sophisticated, the simulator is validated in two steps.
-
-**Step 1.1 — Sanity check** (`scripts/sanity_check.py`): fixes friction, detection distance, and delay, then sweeps initial speed from 5 to 45 m/s with 200 Monte Carlo samples per speed. The expected result is a smooth S-curve — near-zero failures at low speeds, near-100% at high speeds, with a transition around 22–34 m/s. If the curve looks wrong, the physics implementation is broken.
-
-**Step 1.2 — QoI validation** (`scripts/validate_qoi.py`): draws 500 LHS samples across the full 4D space and plots the distribution of safety margins. The histogram should be bimodal, with a clear gap near zero separating safe from failing runs. A unimodal distribution would mean the parameter space is miscalibrated or the simulator has a bug.
-
-## Compressing trajectories with POD
-
-Raw trajectories are high-dimensional: each run produces a time series of position and velocity. That's a lot of data to feed into any downstream model.
-
-The `embedder/pod.py` module addresses this with **Proper Orthogonal Decomposition** (POD). It learns the dominant directions of variation across a set of trajectories using SVD, then projects each trajectory down to a small number of coordinates — the POD codes — that capture at least 99% of the total variance. The mean trajectory is subtracted first so the decomposition focuses on how trajectories differ from one another, not their shared shape.
-
-In practice, 250 LHS-sampled trajectories compress to just a handful of modes with negligible reconstruction error. That means downstream steps can work with compact numeric codes rather than full time series, which matters a lot when those steps are expensive.
-
-**Step 2.1 — POD test** (`simulators/test/test_pod.py`): generates 250 trajectories, fits the embedder, reports how many modes were selected and the reconstruction error, and saves the trajectories, codes, and parameters to `simulators/test/data/` for inspection.
-
-## Project layout
-
-```
-simulators/
-  base_simulator.py        # abstract base class
-  emergency_braking.py     # the braking scenario
-  test/
-    test_pod.py            # step 2.1 — POD embedder validation
-    data/                  # saved trajectories, codes, and parameters
-evaluation/
-  qoi.py                   # safety margin + failure indicator
-  param_space.py           # parameter bounds + LHS sampler
-embedder/
-  pod.py                   # POD trajectory compressor
-scripts/
-  sanity_check.py          # step 1.1
-  validate_qoi.py          # step 1.2
-```
-
-## Running it
+### 1 — Install dependencies
 
 ```bash
 pip install -e .
-
-# Validation
-python scripts/sanity_check.py
-python scripts/validate_qoi.py
-
-# POD embedder test
-python simulators/test/test_pod.py
 ```
 
-Requires Python ≥ 3.9, numpy, scipy, and matplotlib. Generated plots and test datasets are not tracked by git.
+### 2 — Train the Emergency Braking MLP (one-time, ~15 min on CPU)
+
+```bash
+# Step 2a: generate behavioral cloning dataset (~30 seconds)
+python -m scenarios.emergency_braking.train --dataset-only
+
+# Step 2b: train the MLP (~10-20 min on CPU, less with GPU)
+python -m scenarios.emergency_braking.train
+```
+
+The trained model is saved to `scenarios/emergency_braking/models/emergency_braking_mlp.keras`.
+A `training_curves.png` plot is also saved there.
+
+> **Note:** model files and datasets are excluded from git (`.gitignore`).
+> Anyone cloning the repo must run this step before using NN mode.
+
+### 3 — Validate the pipeline (optional but recommended)
+
+```bash
+python scripts/validate_pipeline.py --n 200
+```
+
+Should print `ALL PASS` for both Physics and NN modes.
+
+### 4 — Start the API server
+
+```bash
+# Windows: double-click start.bat, or:
+uvicorn api.server:app --host 0.0.0.0 --port 8001 --reload
+```
+
+### 5 — Open the frontend
+
+Open `frontend/index.html` directly in your browser. The header shows `⬤ API online` when the server is reachable.
+
+---
+
+## Project structure
+
+```
+scenarios/
+  emergency_braking/
+    config.py           # EmergencyBrakingScenario (use_nn flag)
+    train.py            # dataset generation + MLP training
+    nn_controller.py    # BrakingMLP (Keras Sequential)
+    nn_simulator.py     # time integration driven by MLP
+    dataset/            # ← generated, not in git
+    models/             # ← generated, not in git
+  cut_in/               # Blocco 2 (in development)
+  lane_keeping/         # Blocco 3 (requires Docker)
+  base_scenario.py      # abstract BaseScenario interface
+  __init__.py           # SCENARIOS registry
+
+simulators/
+  base_simulator.py
+  emergency_braking.py  # physics simulator (+ run_with_actuals)
+
+embedder/
+  pod.py                # Proper Orthogonal Decomposition via SVD
+
+pipeline/
+  orchestrator.py       # LHS → sim → QoI → POD → rare failures
+  rare_failures.py      # find_rare_failures(), summarise_rare_params()
+
+api/
+  server.py             # FastAPI: /scenarios /run /status /explain /health
+  schemas.py            # Pydantic models
+
+evaluation/
+  qoi.py                # safety margin + failure indicator
+
+frontend/
+  index.html            # 3-screen SPA (scenario → config → results)
+
+scripts/
+  validate_pipeline.py  # end-to-end smoke test
+  sanity_check.py       # physics sanity (speed sweep)
+  validate_qoi.py       # QoI distribution check
+  validate_pod.py       # POD embedder check
+```
+
+---
+
+## Scenario parameters
+
+### Emergency Braking
+
+| Parameter | Range | Description |
+|---|---|---|
+| `initial_speed` | 5–50 m/s | Vehicle speed at obstacle detection |
+| `friction_coefficient` | 0.3–1.0 | Road grip (0.3 = wet/icy, 1.0 = dry asphalt) |
+| `detection_distance` | 10–100 m | Distance to obstacle when detected |
+| `nominal_delay` | 0.05–0.5 s | Braking system reaction delay |
+
+The **safety margin** = `detection_distance - final_position - 2 m`. Negative = crash.
+
+---
+
+## Pipeline parameters (frontend)
+
+| Parameter | Description |
+|---|---|
+| **Samples (N)** | Number of LHS points to simulate. More = better rare-failure coverage, but slower. |
+| **Seed** | Random seed — same seed reproducibly gives the same LHS points. |
+| **Rare fraction (%)** | Bottom-k% of failures to flag as "rare". 5% = only the worst crashes. |
+| **Param bounds** | Editable lower/upper per parameter — narrow them to focus sampling on a specific region. |
+
+---
+
+## Scenarios status
+
+| Scenario | Physics | NN | Requires |
+|---|---|---|---|
+| Emergency Braking | ✅ | ✅ (train first) | nothing |
+| Cut-In | 🚧 Blocco 2 | 🚧 Blocco 2 | nothing |
+| Lane Keeping | ✅ (existing) | ✅ (existing Udacity DNN) | Docker (opensbt-core) |
+
+---
+
+## Docker (Lane Keeping only)
+
+The Lane Keeping scenario calls the opensbt-core Unity simulator via HTTP. To use it:
+
+```bash
+cd opensbt-core
+docker compose up --build
+```
+
+The Emergency Braking and Cut-In scenarios do **not** require Docker.

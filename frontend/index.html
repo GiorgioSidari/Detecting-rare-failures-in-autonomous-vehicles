@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rare Failure Detection — AV Safety</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    /* ── Reset & base ───────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f1117; color: #e2e8f0;
+      min-height: 100vh; display: flex; flex-direction: column;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────── */
+    header {
+      background: #1a1d2e; border-bottom: 1px solid #2d3148;
+      padding: 16px 32px; display: flex; align-items: center; gap: 12px;
+    }
+    .logo  { font-size: 20px; font-weight: 700; color: #7c6ff7; }
+    .sub   { font-size: 12px; color: #6b7280; }
+    #api-status {
+      margin-left: auto; font-size: 12px; padding: 4px 10px;
+      border-radius: 12px; background: #1f2937;
+    }
+    #api-status.ok  { color: #22c55e; }
+    #api-status.err { color: #ef4444; }
+
+    /* ── Layout: 3 screens stacked, only one visible at a time ──── */
+    .screen { display: none; flex: 1; padding: 32px; }
+    .screen.active { display: flex; flex-direction: column; gap: 24px; }
+
+    /* ── Scenario selection grid ─────────────────────────────────── */
+    .scenario-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 16px;
+    }
+    .scenario-card {
+      background: #1a1d2e; border: 1px solid #2d3148; border-radius: 12px;
+      padding: 20px; cursor: pointer; transition: border-color .2s;
+    }
+    .scenario-card:hover { border-color: #7c6ff7; }
+    .scenario-card h3  { color: #7c6ff7; margin-bottom: 8px; font-size: 15px; }
+    .scenario-card p   { font-size: 13px; color: #9ca3af; line-height: 1.5; }
+
+    /* ── Config + run screen ─────────────────────────────────────── */
+    .config-layout {
+      display: grid; grid-template-columns: 320px 1fr; gap: 24px;
+    }
+    .panel {
+      background: #1a1d2e; border: 1px solid #2d3148;
+      border-radius: 12px; padding: 20px;
+    }
+    .panel h3 { font-size: 12px; text-transform: uppercase;
+                letter-spacing: .08em; color: #7c6ff7; margin-bottom: 16px; }
+
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 12px; color: #9ca3af; margin-bottom: 5px; }
+    .field input[type=range] { width: 100%; accent-color: #7c6ff7; }
+    .field .val { font-size: 13px; color: #e2e8f0; margin-left: 8px; }
+
+    .btn {
+      display: inline-block; padding: 10px 22px; border-radius: 8px;
+      border: none; cursor: pointer; font-size: 14px; font-weight: 600;
+      transition: opacity .2s;
+    }
+    .btn:hover { opacity: .85; }
+    .btn-primary { background: #7c6ff7; color: #fff; }
+    .btn-ghost   { background: transparent; border: 1px solid #2d3148; color: #9ca3af; }
+
+    /* progress bar */
+    #progress-bar-wrap {
+      height: 4px; background: #2d3148; border-radius: 2px; overflow: hidden;
+      display: none;
+    }
+    #progress-bar { height: 100%; width: 0%; background: #7c6ff7;
+                    transition: width .3s; }
+
+    /* ── Results screen ──────────────────────────────────────────── */
+    .results-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: auto auto;
+      gap: 20px;
+    }
+    .results-grid .panel.wide { grid-column: 1 / -1; }
+
+    canvas { width: 100% !important; }
+
+    /* stats row */
+    .stats-row { display: flex; gap: 20px; flex-wrap: wrap; }
+    .stat { background: #1a1d2e; border: 1px solid #2d3148; border-radius: 10px;
+            padding: 14px 20px; min-width: 140px; }
+    .stat .label { font-size: 11px; color: #6b7280; text-transform: uppercase;
+                   letter-spacing: .06em; }
+    .stat .value { font-size: 24px; font-weight: 700; color: #7c6ff7; margin-top: 4px; }
+
+    /* rare failure table */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #6b7280; font-weight: 500;
+         border-bottom: 1px solid #2d3148; padding: 8px 6px; }
+    td { padding: 7px 6px; border-bottom: 1px solid #1a1d2e; }
+    tr.rare { color: #f87171; }
+
+    /* Bound inputs */
+    .bound-row {
+      display: grid; grid-template-columns: 1fr auto auto auto; align-items: center;
+      gap: 6px; margin-bottom: 8px;
+    }
+    .bound-row .pname { font-size: 12px; color: #9ca3af; white-space: nowrap;
+                        overflow: hidden; text-overflow: ellipsis; }
+    .bound-row input[type=number] {
+      width: 72px; background: #111827; border: 1px solid #2d3148;
+      border-radius: 6px; color: #e2e8f0; font-size: 12px;
+      padding: 4px 6px; text-align: right;
+    }
+    .bound-row input[type=number]:focus { outline: none; border-color: #7c6ff7; }
+    .bound-row .sep { font-size: 11px; color: #4b5563; }
+
+    /* LLM summary box */
+    #llm-box {
+      background: #111827; border: 1px solid #2d3148; border-radius: 8px;
+      padding: 16px; font-size: 13px; line-height: 1.7; color: #cbd5e1;
+      white-space: pre-wrap; min-height: 80px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">AV Safety</span>
+  <span class="sub">Rare Failure Detection</span>
+  <span id="api-status">⬤ connecting…</span>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     SCREEN 1 — Scenario selection
+═════════════════════════════════════════════════════════════════════ -->
+<section id="screen-select" class="screen active">
+  <h2 style="color:#9ca3af; font-size:14px; text-transform:uppercase; letter-spacing:.08em;">
+    Choose a scenario
+  </h2>
+  <div class="scenario-grid" id="scenario-grid">
+    <!-- populated by JS from GET /scenarios -->
+    <p style="color:#6b7280">Loading scenarios…</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     SCREEN 2 — Config & Run
+═════════════════════════════════════════════════════════════════════ -->
+<section id="screen-config" class="screen">
+  <div style="display:flex; align-items:center; gap:12px;">
+    <button class="btn btn-ghost" onclick="goTo('select')">← Back</button>
+    <h2 id="config-title" style="font-size:18px; color:#e2e8f0;"></h2>
+  </div>
+
+  <div class="config-layout">
+    <!-- Left: parameter sliders -->
+    <div class="panel">
+      <h3>Pipeline parameters</h3>
+
+      <div class="field">
+        <label>Samples (N) <span class="val" id="n-val">500</span></label>
+        <input type="range" id="n-samples" min="50" max="2000" step="50" value="500"
+               oninput="document.getElementById('n-val').textContent=this.value">
+      </div>
+      <div class="field">
+        <label>Seed <span class="val" id="seed-val">42</span></label>
+        <input type="range" id="seed" min="0" max="999" step="1" value="42"
+               oninput="document.getElementById('seed-val').textContent=this.value">
+      </div>
+      <div class="field">
+        <label>Rare fraction (%) <span class="val" id="rare-val">5</span></label>
+        <input type="range" id="rare-fraction" min="1" max="20" step="1" value="5"
+               oninput="document.getElementById('rare-val').textContent=this.value">
+      </div>
+
+      <hr style="border-color:#2d3148; margin: 16px 0;">
+      <h3>Scenario param bounds</h3>
+      <div id="param-bounds-info">
+        <!-- populated when scenario is selected — one editable row per parameter -->
+      </div>
+    </div>
+
+    <!-- Right: run button + progress -->
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div class="panel" style="flex:0;">
+        <p id="scenario-desc" style="font-size:13px; color:#9ca3af; line-height:1.6;"></p>
+      </div>
+
+      <div style="display:flex; gap:12px; align-items:center;">
+        <button class="btn btn-primary" id="run-btn" onclick="runPipeline()">
+          ▶ Run simulation
+        </button>
+        <span id="run-status" style="font-size:13px; color:#6b7280;"></span>
+      </div>
+
+      <div id="progress-bar-wrap">
+        <div id="progress-bar"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     SCREEN 3 — Results
+═════════════════════════════════════════════════════════════════════ -->
+<section id="screen-results" class="screen">
+  <div style="display:flex; align-items:center; gap:12px;">
+    <button class="btn btn-ghost" onclick="goTo('config')">← Back</button>
+    <h2 id="results-title" style="font-size:18px; color:#e2e8f0;"></h2>
+    <button class="btn btn-ghost" style="margin-left:auto;" onclick="goTo('select')">
+      Switch scenario
+    </button>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-row" id="stats-row"></div>
+
+  <div class="results-grid">
+    <!-- Trajectory chart -->
+    <div class="panel wide">
+      <h3>Trajectories</h3>
+      <canvas id="traj-chart"></canvas>
+    </div>
+
+    <!-- Rare failure table -->
+    <div class="panel">
+      <h3>Rare failures</h3>
+      <div style="overflow-x:auto;">
+        <table id="rare-table">
+          <thead><tr id="rare-thead"></tr></thead>
+          <tbody id="rare-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- LLM summary -->
+    <div class="panel">
+      <h3 style="display:flex; justify-content:space-between; align-items:center;">
+        AI summary
+        <button class="btn btn-ghost" style="font-size:11px; padding:4px 10px;"
+                onclick="fetchExplain()">Generate</button>
+      </h3>
+      <div id="llm-box">Click "Generate" to get an AI explanation of the rare failures.</div>
+    </div>
+  </div>
+</section>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────────
+const API = "http://localhost:8001";
+let currentScenario = null;
+let currentJobId    = null;
+let currentResult   = null;
+let trajChart       = null;
+
+// ── Navigation ────────────────────────────────────────────────────────
+function goTo(screen) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(`screen-${screen}`).classList.add('active');
+}
+
+// ── Health check ──────────────────────────────────────────────────────
+async function checkHealth() {
+  const el = document.getElementById('api-status');
+  try {
+    const r = await fetch(`${API}/health`);
+    if (r.ok) { el.textContent = '⬤ API online'; el.className = 'ok'; }
+    else       { el.textContent = '⬤ API error';  el.className = 'err'; }
+  } catch { el.textContent = '⬤ API offline'; el.className = 'err'; }
+}
+
+// ── Load scenarios ────────────────────────────────────────────────────
+async function loadScenarios() {
+  const grid = document.getElementById('scenario-grid');
+  try {
+    const r = await fetch(`${API}/scenarios`);
+    const scenarios = await r.json();
+    grid.innerHTML = '';
+    scenarios.forEach(s => {
+      const card = document.createElement('div');
+      card.className = 'scenario-card';
+      card.innerHTML = `<h3>${s.name.replace(/_/g,' ')}</h3><p>${s.description}</p>`;
+      card.onclick = () => selectScenario(s);
+      grid.appendChild(card);
+    });
+  } catch {
+    grid.innerHTML = '<p style="color:#ef4444">Could not load scenarios — is the API running?</p>';
+  }
+}
+
+// ── Select scenario ───────────────────────────────────────────────────
+function selectScenario(scenario) {
+  currentScenario = scenario;
+  document.getElementById('config-title').textContent =
+    scenario.name.replace(/_/g, ' ');
+  document.getElementById('scenario-desc').textContent = scenario.description;
+
+  // Populate editable param bounds (one row per parameter)
+  const info = document.getElementById('param-bounds-info');
+  info.innerHTML = scenario.param_names.map((n, i) => `
+    <div class="bound-row">
+      <span class="pname" title="${n}">${n}</span>
+      <input type="number" id="lb-${i}" value="${scenario.param_lower[i]}"
+             step="any" title="Lower bound">
+      <span class="sep">–</span>
+      <input type="number" id="ub-${i}" value="${scenario.param_upper[i]}"
+             step="any" title="Upper bound">
+    </div>`
+  ).join('');
+
+  goTo('config');
+}
+
+// ── Run pipeline ──────────────────────────────────────────────────────
+async function runPipeline() {
+  if (!currentScenario) return;
+
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('run-status').textContent = 'Submitting…';
+  document.getElementById('progress-bar-wrap').style.display = 'block';
+  document.getElementById('progress-bar').style.width = '10%';
+
+  // Collect custom bounds from editable inputs (if present)
+  const nParams = currentScenario.param_names.length;
+  const customLower = [], customUpper = [];
+  let boundsModified = false;
+  for (let i = 0; i < nParams; i++) {
+    const lb = parseFloat(document.getElementById(`lb-${i}`)?.value);
+    const ub = parseFloat(document.getElementById(`ub-${i}`)?.value);
+    customLower.push(isNaN(lb) ? currentScenario.param_lower[i] : lb);
+    customUpper.push(isNaN(ub) ? currentScenario.param_upper[i] : ub);
+    if (lb !== currentScenario.param_lower[i] || ub !== currentScenario.param_upper[i])
+      boundsModified = true;
+  }
+
+  const body = {
+    n_samples:     parseInt(document.getElementById('n-samples').value),
+    seed:          parseInt(document.getElementById('seed').value),
+    rare_fraction: parseInt(document.getElementById('rare-fraction').value) / 100,
+    param_lower:   customLower,
+    param_upper:   customUpper,
+  };
+
+  try {
+    const r = await fetch(`${API}/run/${currentScenario.name}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const { job_id } = await r.json();
+    currentJobId = job_id;
+    document.getElementById('progress-bar').style.width = '30%';
+    pollStatus();
+  } catch(e) {
+    document.getElementById('run-status').textContent = 'Error: ' + e.message;
+    document.getElementById('run-btn').disabled = false;
+  }
+}
+
+// ── Poll status ───────────────────────────────────────────────────────
+async function pollStatus() {
+  const r = await fetch(`${API}/status/${currentJobId}`);
+  const data = await r.json();
+
+  if (data.status === 'queued' || data.status === 'running') {
+    document.getElementById('run-status').textContent = data.status + '…';
+    document.getElementById('progress-bar').style.width = '60%';
+    setTimeout(pollStatus, 1000);
+    return;
+  }
+
+  document.getElementById('progress-bar').style.width = '100%';
+  document.getElementById('run-btn').disabled = false;
+
+  if (data.status === 'error') {
+    document.getElementById('run-status').textContent = 'Error: ' + data.error;
+    return;
+  }
+
+  // Done — render results
+  currentResult = data;
+  renderResults(data);
+  goTo('results');
+}
+
+// ── Render results ────────────────────────────────────────────────────
+function renderResults(data) {
+  document.getElementById('results-title').textContent =
+    data.scenario_name.replace(/_/g, ' ');
+
+  // Stats
+  document.getElementById('stats-row').innerHTML = `
+    <div class="stat"><div class="label">Samples</div><div class="value">${data.n_samples}</div></div>
+    <div class="stat"><div class="label">Failure rate</div><div class="value">${(data.failure_rate*100).toFixed(1)}%</div></div>
+    <div class="stat"><div class="label">Rare failures</div><div class="value">${data.rare_failure_idx.length}</div></div>
+    <div class="stat"><div class="label">POD modes</div><div class="value">${data.pod_n_modes}</div></div>
+  `;
+
+  // Trajectory chart — plot position (dim 0) over time
+  renderTrajectories(data);
+
+  // Rare failure table
+  renderRareTable(data);
+
+  // Reset LLM box
+  document.getElementById('llm-box').textContent =
+    'Click "Generate" to get an AI explanation of the rare failures.';
+}
+
+function renderTrajectories(data) {
+  if (trajChart) { trajChart.destroy(); trajChart = null; }
+
+  const trajs   = data.trajectories;      // (N, T, D)
+  const safeMask = data.safe_mask;
+  const rareSet  = new Set(data.rare_failure_idx);
+  const N = trajs.length, T = trajs[0].length;
+  const times = Array.from({length: T}, (_, i) => (i * 0.01).toFixed(2));
+
+  const datasets = [];
+
+  // Nominal trajectory (green, thick)
+  if (data.nominal_trajectory) {
+    datasets.push({
+      label: 'Nominal',
+      data: data.nominal_trajectory[0].map(s => s[0]),
+      borderColor: '#22c55e', borderWidth: 2.5,
+      pointRadius: 0, tension: 0.3,
+    });
+  }
+
+  // Safe trajectories (dim grey, thin)
+  for (let i = 0; i < N; i++) {
+    if (!safeMask[i]) continue;
+    datasets.push({
+      label: i === 0 ? 'Safe' : undefined,
+      data: trajs[i].map(s => s[0]),
+      borderColor: 'rgba(100,116,139,0.15)', borderWidth: 1,
+      pointRadius: 0, tension: 0.3,
+    });
+  }
+
+  // Failure trajectories (red)
+  for (let i = 0; i < N; i++) {
+    if (safeMask[i]) continue;
+    const isRare = rareSet.has(i);
+    datasets.push({
+      label: isRare ? 'Rare failure' : (i === 0 ? 'Failure' : undefined),
+      data: trajs[i].map(s => s[0]),
+      borderColor: isRare ? '#ef4444' : 'rgba(239,68,68,0.35)',
+      borderWidth: isRare ? 2 : 1,
+      pointRadius: 0, tension: 0.3,
+    });
+  }
+
+  const ctx = document.getElementById('traj-chart').getContext('2d');
+  trajChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: times, datasets },
+    options: {
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 10, color: '#6b7280' },
+             grid: { color: '#1f2937' } },
+        y: { title: { display: true, text: 'Position (m)', color: '#9ca3af' },
+             ticks: { color: '#6b7280' }, grid: { color: '#1f2937' } },
+      },
+    },
+  });
+}
+
+function renderRareTable(data) {
+  const thead = document.getElementById('rare-thead');
+  const tbody = document.getElementById('rare-tbody');
+  const names = data.param_names;
+
+  thead.innerHTML = '<th>#</th>' + names.map(n => `<th>${n}</th>`).join('') +
+                    '<th>margin</th>';
+  tbody.innerHTML = '';
+
+  const rareSet = new Set(data.rare_failure_idx);
+  let rank = 1;
+  data.rare_failure_idx.forEach(idx => {
+    // params not included directly — use rare_params_summary
+  });
+
+  (data.rare_params_summary || []).forEach((row, i) => {
+    const tr = document.createElement('tr');
+    tr.className = 'rare';
+    const margin = data.safety_margins[data.rare_failure_idx[i]];
+    tr.innerHTML = `<td>${i + 1}</td>` +
+      names.map(n => `<td>${row.params[n] !== undefined ? row.params[n].toFixed(2) : '—'}</td>`).join('') +
+      `<td>${margin !== undefined ? margin.toFixed(3) : '—'}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── LLM explain ───────────────────────────────────────────────────────
+async function fetchExplain() {
+  if (!currentJobId) return;
+  const box = document.getElementById('llm-box');
+  box.textContent = 'Generating explanation…';
+  try {
+    const r = await fetch(`${API}/explain/${currentJobId}`, { method: 'POST' });
+    const { summary } = await r.json();
+    box.textContent = summary;
+  } catch(e) {
+    box.textContent = 'Error: ' + e.message;
+  }
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
+checkHealth();
+loadScenarios();
+setInterval(checkHealth, 10_000);
+</script>
+</body>
+</html>
