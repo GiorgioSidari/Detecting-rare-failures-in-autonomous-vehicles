@@ -96,6 +96,65 @@ class EmergencyBrakingSimulator(BaseSimulator):
 
         return trajectories
 
+    def run_with_actuals(self, controllable_parameters: np.ndarray):
+        """
+        Identical to run() but also returns the stochastic variables that were
+        sampled internally, so callers (e.g. the dataset generator) can use
+        them to label timesteps correctly.
+
+        Returns
+        -------
+        trajectories   : (N, T, 2)
+        actual_delays  : (N,)  — real reaction delay used per trajectory
+        actual_decels  : (N,)  — real deceleration used per trajectory
+        """
+        N = controllable_parameters.shape[0]
+        initial_speeds      = controllable_parameters[:, 0]
+        friction_coeffs     = controllable_parameters[:, 1]
+        detection_distances = controllable_parameters[:, 2]
+        nominal_delays      = controllable_parameters[:, 3]
+
+        braking_efficiency = truncnorm.rvs(
+            _BRAKING_A, _BRAKING_B,
+            loc=BRAKING_EFFICIENCY_MEAN,
+            scale=BRAKING_EFFICIENCY_STD,
+            size=N,
+        )
+        raw_delay_noise = np.random.lognormal(mean=0.0, sigma=DELAY_NOISE_LOG_SIGMA, size=N)
+        delay_noise = raw_delay_noise - _LOGNORMAL_MEAN
+
+        actual_delays = np.maximum(HARDWARE_MIN_DELAY, nominal_delays + delay_noise)
+        actual_decels = friction_coeffs * 9.81 * braking_efficiency
+
+        trajectories = np.zeros((N, self.T, 2))
+        positions    = np.zeros(N)
+        velocities   = initial_speeds.copy()
+        active       = np.ones(N, dtype=bool)
+
+        for t_idx in range(self.T):
+            t = t_idx * self.dt
+            trajectories[:, t_idx, 0] = positions
+            trajectories[:, t_idx, 1] = velocities
+
+            delay_mask = active & (t < actual_delays)
+            positions[delay_mask] += velocities[delay_mask] * self.dt
+
+            braking_mask = active & (t >= actual_delays)
+            new_v = np.maximum(0.0, velocities[braking_mask] - actual_decels[braking_mask] * self.dt)
+            positions[braking_mask] += new_v * self.dt
+            velocities[braking_mask] = new_v
+
+            active[positions >= detection_distances] = False
+            active[velocities == 0.0] = False
+
+            if not np.any(active):
+                for t_rem in range(t_idx + 1, self.T):
+                    trajectories[:, t_rem, 0] = positions
+                    trajectories[:, t_rem, 1] = velocities
+                break
+
+        return trajectories, actual_delays, actual_decels
+
     def ParamBounds(self) -> dict:
         """
         Physical parameter bounds for the 4 controllable inputs.

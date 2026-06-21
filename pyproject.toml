@@ -12,7 +12,11 @@ dependencies = [
     "numpy",
     "scipy",
     "matplotlib",
+    "tensorflow>=2.13",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.0",
 ]
 
 [tool.setuptools.packages.find]
-include = ["embedder*", "evaluation*", "simulators*"]
+include = ["embedder*", "evaluation*", "simulators*", "scenarios*", "pipeline*", "api*"]
