@@ -1,0 +1,14 @@
+# Normalize all text files to LF in the repo.
+# Git converts to CRLF on Windows checkout automatically.
+* text=auto eol=lf
+
+# Explicitly binary — never touch line endings
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.keras binary
+*.h5    binary
+*.npy   binary
+*.docx  binary
+*.pdf   binary
+*.csv   binary
