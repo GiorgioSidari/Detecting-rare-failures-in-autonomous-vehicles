@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  simulator:
+    build:
+      context: . # Where to look for files when building
+      dockerfile: Simulator/Dockerfile
+    image: paologinefra/se2rp-simulator
+    ports:
+      - "8000:8000" # Map host:container ports
+    stdin_open: true # Same as -it (interactive terminal)
+    tty: true
+    restart: unless-stopped # Optional: auto-restart unless manually stopped
