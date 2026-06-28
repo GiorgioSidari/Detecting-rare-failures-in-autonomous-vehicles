@@ -5,6 +5,7 @@ Definition used: the bottom-k% of safety_margins among failures.
 These are the cases that not only crashed, but crashed the hardest —
 statistically the most extreme outcomes in the dataset.
 """
+from __future__ import annotations
 
 import numpy as np
 
@@ -13,6 +14,7 @@ def find_rare_failures(
     safety_margins: np.ndarray,
     failures: np.ndarray,
     fraction: float = 0.05,
+    tiebreak: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Return indices of the rarest (worst) failures.
@@ -34,9 +36,19 @@ def find_rare_failures(
     if len(failure_idx) == 0:
         return np.array([], dtype=int)
 
-    # Sort failures by safety_margin ascending (most negative = worst first)
-    sorted_by_margin = failure_idx[np.argsort(safety_margins[failure_idx])]
+    margins_sub = safety_margins[failure_idx]
+    if tiebreak is not None:
+        # Primario: margine crescente (piu' negativo = peggiore).
+        # Secondario: 'tiebreak' crescente. Quando la QoI satura (l'auto esce di
+        # corsia, XTE tagliata al massimo), decine di failure hanno lo stesso
+        # margine: usiamo il tempo di sopravvivenza (n. step) come spareggio, cosi'
+        # tra crash equivalenti sono "piu' rari" quelli che escono prima.
+        tb_sub = np.asarray(tiebreak, dtype=float)[failure_idx]
+        order = np.lexsort((tb_sub, margins_sub))
+    else:
+        order = np.argsort(margins_sub)
 
+    sorted_by_margin = failure_idx[order]
     k = max(1, int(np.ceil(len(sorted_by_margin) * fraction)))
     return sorted_by_margin[:k]
 

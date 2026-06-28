@@ -2,7 +2,13 @@ import os
 from typing import Tuple
 
 # DNN Model
-DNN_MODEL_PATH = r"./Simulator/SelfDrivingModels/mixed-chauffeur.h5"
+# Selectable per-container via the DNN_MODEL_PATH environment variable so that
+# two simulator containers can run different autopilots for the multi-model
+# comparison (Step D). Falls back to the chauffeur model when unset.
+DNN_MODEL_PATH = os.environ.get(
+    "DNN_MODEL_PATH",
+    r"./Simulator/SelfDrivingModels/mixed-chauffeur.h5",
+)
 
 
 # Simulators

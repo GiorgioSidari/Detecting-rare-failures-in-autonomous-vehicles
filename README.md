@@ -145,13 +145,64 @@ The **safety margin** = `detection_distance - final_position - 2 m`. Negative = 
 
 ---
 
-## Docker (Lane Keeping only)
+## Lane Keeping — how it works and how to run it
 
-The Lane Keeping scenario calls the opensbt-core Unity simulator via HTTP. To use it:
+The Lane Keeping scenario stress-tests a neural-network autopilot (the Udacity "chauffeur" DNN) by driving it on procedurally generated roads and measuring how well it stays inside the lane. Unlike Emergency Braking and Cut-In, which run in-process, here the actual driving happens inside the opensbt-core Unity simulator, which the Python code drives over HTTP: for each sampled scenario the client sends the road parameters to the simulator, the simulator runs the drive, and returns the trajectory (position, cross-track error and steering, step by step).
+
+### Architecture: a pool of parallel simulators
+
+Each simulator container holds a single Unity instance and runs **one** simulation at a time — it is inherently sequential. To avoid waiting for hours when sampling dozens of scenarios, the system starts **several containers in parallel** (4 by default), each on its own port (8000, 8001, ...), and distributes the jobs across the pool through a shared queue. With W workers the throughput is roughly W times that of a single container. The client health-checks every worker before starting and skips the unreachable ones; on top of that each job has an individual timeout, so a stuck container only fails its own scenario instead of freezing the whole batch. Full details are in `opensbt-core/PARALLELIZZAZIONE.md`.
+
+### One-time setup
+
+The model and the Unity executable are not in the repo (excluded via `.gitignore`) and must be downloaded from the Google Drive linked in `opensbt-core/README.md`, then placed as follows:
+
+- the model `mixed-chauffeur.h5` in `opensbt-core/Simulator/SelfDrivingModels/`
+- the Ubuntu build of the simulator in `opensbt-core/Simulator/SimulatorExec/ubuntu_binaries/` (the file `ubuntu.x86_64` must exist, with execute permission)
+
+### Starting the simulators
+
+From `opensbt-core/`, generate the compose file for the desired number of workers and start the containers:
 
 ```bash
 cd opensbt-core
-docker compose up --build
+python gen_parallel_compose.py 4          # 4 containers on ports 8000-8003
+docker compose -f docker-compose.parallel.yml up --build
 ```
 
-The Emergency Braking and Cut-In scenarios do **not** require Docker.
+Alternatively, `./run_parallel.sh 4` does both and keeps the containers and `NUM_WORKERS` in sync. Leave this window open: it is the server. You can check that the workers respond by opening `http://localhost:8000/health` ... `8003/health`.
+
+### Running experiments
+
+In a second terminal, using the same number of workers, run the script that executes the full pipeline (LHS sampling → simulations on the pool → QoI → POD compression → rare-failure detection) and prints a readable report:
+
+```bash
+python scripts/run_lanekeeping.py --n 50 --workers 4
+```
+
+Main options:
+
+- `--n` number of sampled scenarios (higher = more accurate estimates but slower)
+- `--workers` number of parallel containers (must match the ones you started)
+- `--preset full|realistic` — `full` is the complete extended space (angles up to 85°, speed up to 30 m/s); `realistic` narrows to a plausible operational design domain (gentler angles, plausible speeds with non-overlapping min/max) so the measured failure rate reflects realistic conditions rather than an artificially wide space
+- `--max-speed X` force the speed cap (m/s) on any preset, handy for studying the effect of speed
+- `--trace-worst` print the step-by-step trace (x, XTE, steering) of the worst scenario, to see *how* it fails
+- `--seed`, `--quiet` for reproducibility and to silence the per-job progress
+
+A typical run for an informative analysis and its diagnosis:
+
+```bash
+python scripts/run_lanekeeping.py --n 30 --preset realistic --max-speed 6 --trace-worst
+```
+
+### Reading the report
+
+The report shows the **failure rate** (share of scenarios with safety margin < 0), the **rare failure rate** (the worst bottom-k%, 5% by default), the distribution of margins sorted from worst to best, and the table of the most critical scenarios with their parameters and the number of steps survived. It also reports **invalid scenarios** that are *excluded* from the analysis rather than counted: degenerate runs (simulations aborted in very few steps) and physically-inconsistent parameter combinations (e.g. `min_speed > max_speed`). Rates and rare failures are computed only over the valid scenarios, so the failure rate is not polluted by non-real cases. For each rare failure the runner also prints a **data-driven explanation** derived from its trajectory: the failure mode (unstable oscillation / uncorrected drift / wrong-way steering), which side it left the lane, after how many steps, and the scenario context (sharpest curve, speed band).
+
+The safety margin combines three signals: how well the car stays inside the lane (weight 0.6), the abruptness of the steering (0.2) and how early it approaches the edge (0.2). Because the cross-track error saturates once the car leaves the lane, many "full" failures end up with the same margin; to tell them apart, among failures with equal margin the ones that leave the lane **earlier** are considered rarer (survival time as a tie-breaker).
+
+### A note on the results
+
+On this model the failure rate stays high even when narrowing geometry and speed: speed is a modest lever (from ~94% down to ~85% going from 30 to 6 m/s) and the traces show an oscillatory instability of the controller on curves. In practice the lane-keeper is reliable only within gentle curves and low speeds; the value of the analysis lies in characterising *which* combinations of curvature and speed push it into failure — which is exactly what the pipeline (QoI + POD + rare failures) surfaces.
+
+Emergency Braking and Cut-In do **not** require Docker.
