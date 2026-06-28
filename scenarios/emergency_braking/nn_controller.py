@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 MLP controller for the Emergency Braking scenario.
 

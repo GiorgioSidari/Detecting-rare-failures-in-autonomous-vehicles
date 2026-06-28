@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Pipeline orchestrator — scenario-agnostic.
 
@@ -6,8 +8,6 @@ Given a scenario name and sampling config, runs the full pipeline:
 
 Returns a PipelineResult that the API serialises and the frontend renders.
 """
-
-from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass, field
 from scipy.stats.qmc import LatinHypercube, scale
@@ -109,9 +109,12 @@ def run(
     safety_margins = scenario.compute_qoi(trajectories, params)      # (N,)
     failures = scenario.is_failure(safety_margins)                   # (N,)
 
-    # 5. POD embedding
+    # 5. POD embedding — usa x, XTE e steering (canali 0, 2, 3); escludi y
+    #    x è monotono lungo la strada e fornisce la struttura temporale dominante
+    #    y è posizione laterale assoluta, ridondante con XTE → rimossa
+    traj_pod = trajectories[:, :, [0, 2, 3]]                       # (N, T, 3): x + xte + steering
     pod = EmbedderPOD(variance_threshold=pod_variance_threshold)
-    pod_codes = pod.fit_transform(trajectories)                      # (N, k)
+    pod_codes = pod.fit_transform(traj_pod)                         # (N, k)
 
     # 6. Rare failure detection
     rare_idx = find_rare_failures(
