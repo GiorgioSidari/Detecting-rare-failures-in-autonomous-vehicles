@@ -25,7 +25,9 @@ TODO (Blocco 3): implement run_simulation() as async call to SimulatorServer.
 import numpy as np
 from scenarios.base_scenario import BaseScenario
 
-MAX_XTE = 2.5   # metres — from opensbt-core config
+MAX_XTE     = 3.0   # metres — matches opensbt-core/Simulator/lanekeeping/config.py
+STEER_NORM  = 0.3   # reference steering std (calibrate after first runs)
+EARLY_FRAC  = 0.7   # XTE fraction that triggers early-exit penalty
 
 
 class LaneKeepingScenario(BaseScenario):
@@ -44,7 +46,7 @@ class LaneKeepingScenario(BaseScenario):
                 "min_speed (m/s)", "max_speed (m/s)",
                 "segment_length (m)",
             ],
-            "lower": np.array([0,   0,   0,   0,   0,   5.0,  10.0, 10.0]),
+            "lower": np.array([0,   0,   0,   0,   0,   10.0, 10.0, 10.0]),
             "upper": np.array([85,  85,  85,  85,  85,  15.0, 30.0, 40.0]),
         }
 
@@ -52,10 +54,12 @@ class LaneKeepingScenario(BaseScenario):
         """
         Calls SimulatorServer POST /simulate for each param row.
 
-        Returns trajectories (N, T, 3): [x, y, xte] per timestep.
-        T may vary per run — will be padded to the longest run.
+        Returns trajectories (N, T, 4): [x, z, xte, steering] per timestep.
+        position comes from udacity_sim.py as (pos_x, pos_z, pos_y) — a list,
+        not a dict. Index 0=x, 1=z (height), 2=xte, 3=steering.
+        T may vary per run — padded to the longest run.
 
-        TODO (Blocco 3): implement HTTP calls to opensbt-core API.
+        TODO (Step A): implement HTTP calls to opensbt-core SimulatorServer.
         """
         raise NotImplementedError(
             "LaneKeepingScenario requires Docker (opensbt-core). "
@@ -64,12 +68,39 @@ class LaneKeepingScenario(BaseScenario):
 
     def compute_qoi(self, trajectories: np.ndarray, params: np.ndarray) -> np.ndarray:
         """
-        Safety margin = MAX_XTE - max(|xte|) over the run.
-        Positive → stayed in lane, Negative → left the road.
+        Composite safety score combining three metrics:
+          M1 (0.6): XTE margin — primary failure signal
+          M2 (0.2): steering oscillation penalty — instability proxy
+          M3 (0.2): early XTE violation penalty — trajectory-to-failure signal
+
+        M2 and M3 require the steering channel (index 3), added in Step A.
+        Falls back to M1 only if trajectories have fewer than 4 channels.
         """
-        xte = trajectories[:, :, 2]          # (N, T)
-        max_xte_per_run = np.abs(xte).max(axis=1)   # (N,)
-        return MAX_XTE - max_xte_per_run
+        xte = trajectories[:, :, 2]   # (N, T)
+        T = xte.shape[1]
+
+        # M1: XTE margin
+        max_xte = np.abs(xte).max(axis=1)
+        m1 = MAX_XTE - max_xte   # (N,)
+
+        if trajectories.shape[2] < 4:
+            return m1
+
+        # M2: steering oscillation penalty — high std = unstable driving
+        steering = trajectories[:, :, 3]   # (N, T)
+        steer_std = steering.std(axis=1)
+        m2 = -np.clip(steer_std / STEER_NORM, 0.0, 1.0)   # (N,) in [-1, 0]
+
+        # M3: early XTE violation penalty
+        over_threshold = np.abs(xte) > EARLY_FRAC * MAX_XTE   # (N, T) bool
+        first_violation = np.where(
+            over_threshold.any(axis=1),
+            over_threshold.argmax(axis=1).astype(float),
+            float(T),
+        )
+        m3 = -(T - first_violation) / T   # (N,) in [-1, 0]
+
+        return 0.6 * m1 + 0.2 * m2 + 0.2 * m3
 
     def failure_threshold(self) -> float:
         return 0.0
