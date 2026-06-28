@@ -98,18 +98,28 @@ class UdacitySimulator():
             self.done = False
             self.loopStartTime = time.time()
             iterations = 0
-            
+
+            # Per-step time split: inference (agent.predict) vs waiting for the Unity frame
+            # (env.step). Tells WHERE the control-loop time goes: CPU/inference or I/O to the
+            # simulator.
+            predictSeconds = 0.0
+            stepSeconds = 0.0
+
             while not self.done:
                 # Infer next actions (moved inline)
+                _t_pred0 = time.perf_counter()
                 actions = self.agent.predict(obs=obs, state=dict(speed=speed, simulator_name=UDACITY_SIM_NAME))
-                
+                predictSeconds += time.perf_counter() - _t_pred0
+
                 # Clip actions inline
                 if isinstance(self.env.action_space, gym.spaces.Box): # type: ignore
                     actions = np.clip(actions, self.env.action_space.low, self.env.action_space.high) # type: ignore
-                
+
                 # Environment step
+                _t_step0 = time.perf_counter()
                 obs, done, info = self.env.step(actions)
-                
+                stepSeconds += time.perf_counter() - _t_step0
+
                 # Update speed
                 speed = info.get("speed", 0.0)
                 
@@ -142,6 +152,8 @@ class UdacitySimulator():
             #Add the timing stats to the output
             simulationOutput.elapsedTime = elapsedTime
             simulationOutput.iterations = iterations
+            simulationOutput.predictSeconds = predictSeconds   # total inference time
+            simulationOutput.stepSeconds = stepSeconds         # total Unity-wait time
 
         except Exception as e:
             raise e
