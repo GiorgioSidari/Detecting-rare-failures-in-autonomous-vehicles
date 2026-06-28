@@ -56,6 +56,21 @@ class UnityProcess(object):
         true_filename = os.path.basename(os.path.normpath(file_name))
         launch_string = None
         port_args = ["--port", str(port), '-logFile', 'unitylog.txt']
+
+        # Rendering leggero: sotto Xvfb Unity renderizza via software GL (llvmpipe,
+        # niente GPU), e il render della scena e' il collo di bottiglia del loop di
+        # controllo (~85% del tempo/step). Abbassare risoluzione e qualita' riduce il
+        # costo di fill-rate e alza la cadenza. Tarabile via env (0 = non passare il
+        # flag e lasciare i default del build).
+        _w = os.getenv("UNITY_SCREEN_WIDTH", "320")
+        _h = os.getenv("UNITY_SCREEN_HEIGHT", "240")
+        _q = os.getenv("UNITY_SCREEN_QUALITY", "Fastest")
+        if _w and _w != "0":
+            port_args += ["-screen-width", str(_w)]
+        if _h and _h != "0":
+            port_args += ["-screen-height", str(_h)]
+        if _q and _q != "0":
+            port_args += ["-screen-quality", str(_q)]
         platform_ = platform.system()
 
         if platform_.lower() == "linux" and sim_path:

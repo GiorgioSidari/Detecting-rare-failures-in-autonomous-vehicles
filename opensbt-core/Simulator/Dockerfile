@@ -4,6 +4,8 @@ WORKDIR /simulator
 
 RUN apt-get update && apt-get install -y \
     libgl1 xvfb \
+    libgl1-mesa-dri \
+    libgl1-mesa-glx \
     libglu1-mesa \
     libxrender1 \
     libxrandr2 \
@@ -30,6 +32,21 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 COPY ./Simulator /simulator/Simulator
 
 ENV PYTHONUNBUFFERED=1
+# Force Mesa software rendering (llvmpipe): there is no GPU under Xvfb/emulation,
+# so Unity must use the software GL path to obtain a context.
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV GALLIUM_DRIVER=llvmpipe
 
-# Start Xvfb virtual display then uvicorn
-CMD Xvfb :99 -screen 0 1024x768x24 & export DISPLAY=:99 && uvicorn Simulator.SimulatorServer:app --host 0.0.0.0 --port 8000
+# Start Xvfb virtual display then uvicorn.
+# - rm -f the stale X lock so a restart (restart: unless-stopped) never gets stuck
+#   on "Server is already active for display 99".
+# - GLX/render extensions + sleep give the Unity simulator a working software-GL
+#   display to attach to (the app forces graphical mode, so a display is required).
+# Il virtual display Xvfb: risoluzione bassa (320x240) perche' Unity renderizza via
+# software GL (llvmpipe) e il costo di render e' proporzionale ai pixel — meno pixel,
+# frame piu' veloci, cadenza di controllo piu' alta. Tarabile via env XVFB_RESOLUTION.
+ENV XVFB_RESOLUTION=320x240x24
+CMD rm -f /tmp/.X99-lock; \
+    Xvfb :99 -screen 0 ${XVFB_RESOLUTION} -ac +extension GLX +extension RANDR +render -noreset & \
+    sleep 3 && export DISPLAY=:99 && \
+    uvicorn Simulator.SimulatorServer:app --host 0.0.0.0 --port 8000
