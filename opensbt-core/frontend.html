@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Self-Driving Car Simulator</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1a1d2e;
+      border-bottom: 1px solid #2d3148;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header .logo { font-size: 22px; font-weight: 700; color: #7c6ff7; }
+    header .subtitle { font-size: 13px; color: #6b7280; }
+
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #22c55e; margin-left: auto;
+      box-shadow: 0 0 8px #22c55e;
+      animation: pulse 2s infinite;
+    }
+    .status-dot.offline { background: #ef4444; box-shadow: 0 0 8px #ef4444; animation: none; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 0;
+      height: calc(100vh - 60px);
+    }
+
+    .sidebar {
+      background: #1a1d2e;
+      border-right: 1px solid #2d3148;
+      padding: 24px;
+      overflow-y: auto;
+    }
+
+    .main {
+      padding: 24px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #7c6ff7; margin-bottom: 14px; }
+
+    .field { margin-bottom: 16px; }
+    .field label { display: block; font-size: 13px; color: #9ca3af; margin-bottom: 6px; }
+    .field input {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: #e2e8f0;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .field input:focus { border-color: #7c6ff7; }
+
+    .angles-section { margin-bottom: 16px; }
+    .angles-label { font-size: 13px; color: #9ca3af; margin-bottom: 8px; display: block; }
+
+    .angles-row {
+      display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;
+    }
+
+    .angle-chip {
+      display: flex; align-items: center; gap: 4px;
+      background: #0f1117; border: 1px solid #2d3148;
+      border-radius: 6px; padding: 4px 8px; font-size: 13px;
+    }
+    .angle-chip span { min-width: 32px; text-align: center; }
+    .angle-chip button {
+      background: none; border: none; color: #6b7280;
+      cursor: pointer; font-size: 14px; padding: 0 2px;
+      line-height: 1;
+    }
+    .angle-chip button:hover { color: #ef4444; }
+
+    .angle-add { display: flex; gap: 8px; }
+    .angle-add input {
+      flex: 1; background: #0f1117; border: 1px solid #2d3148;
+      border-radius: 8px; padding: 8px 10px;
+      color: #e2e8f0; font-size: 13px; outline: none;
+    }
+    .angle-add input:focus { border-color: #7c6ff7; }
+    .angle-add button {
+      background: #2d3148; border: none; border-radius: 8px;
+      padding: 8px 14px; color: #e2e8f0; cursor: pointer; font-size: 13px;
+    }
+    .angle-add button:hover { background: #3d4168; }
+
+    .road-preview {
+      background: #0f1117; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 12px; margin-bottom: 16px;
+      text-align: center;
+    }
+    .road-preview canvas { display: block; margin: 0 auto; }
+    .road-preview .preview-label { font-size: 11px; color: #4b5563; margin-top: 6px; }
+
+    .btn-run {
+      width: 100%; padding: 13px;
+      background: linear-gradient(135deg, #7c6ff7, #5b50cc);
+      border: none; border-radius: 10px;
+      color: white; font-size: 15px; font-weight: 600;
+      cursor: pointer; transition: opacity 0.2s;
+    }
+    .btn-run:hover { opacity: 0.9; }
+    .btn-run:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Status bar */
+    .status-bar {
+      background: #1a1d2e; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 16px 20px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .status-bar .job-status {
+      font-size: 13px; font-weight: 600; padding: 4px 10px;
+      border-radius: 20px;
+    }
+    .status-queued   { background: #1d3154; color: #60a5fa; }
+    .status-simulating { background: #1e3a2f; color: #34d399; animation: pulse 1.5s infinite; }
+    .status-done     { background: #1a2e1a; color: #22c55e; }
+    .status-error    { background: #2e1a1a; color: #ef4444; }
+    .status-idle     { background: #1a1d2e; color: #6b7280; }
+
+    .status-bar .job-id { font-size: 11px; color: #4b5563; font-family: monospace; }
+
+    /* Results grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+
+    .stat-card {
+      background: #1a1d2e; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 16px;
+    }
+    .stat-card .val { font-size: 24px; font-weight: 700; color: #e2e8f0; }
+    .stat-card .unit { font-size: 12px; color: #6b7280; }
+    .stat-card .label { font-size: 12px; color: #6b7280; margin-top: 4px; }
+    .stat-card.danger .val { color: #ef4444; }
+    .stat-card.success .val { color: #22c55e; }
+
+    /* Charts */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .chart-card {
+      background: #1a1d2e; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 16px;
+    }
+    .chart-card h4 { font-size: 13px; color: #9ca3af; margin-bottom: 12px; }
+
+    .road-card {
+      background: #1a1d2e; border: 1px solid #2d3148;
+      border-radius: 10px; padding: 16px;
+    }
+    .road-card h4 { font-size: 13px; color: #9ca3af; margin-bottom: 12px; }
+    .road-card canvas { display: block; margin: 0 auto; }
+
+    .empty-state {
+      text-align: center; padding: 60px 20px; color: #4b5563;
+    }
+    .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+    .empty-state p { font-size: 14px; }
+
+    .divider { border: none; border-top: 1px solid #2d3148; margin: 20px 0; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">🚗 Self-Driving Simulator</div>
+    <div class="subtitle">Udacity Lane Keeping · OpenSBT</div>
+  </div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+    <span id="serverStatus" style="font-size:12px;color:#6b7280">Connessione...</span>
+    <div id="statusDot" class="status-dot offline"></div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <h3>Configurazione Simulazione</h3>
+
+    <div class="angles-section">
+      <span class="angles-label">Angoli della strada</span>
+      <div class="road-preview">
+        <canvas id="roadPreview" width="300" height="130"></canvas>
+        <div class="preview-label">Anteprima percorso (vista dall'alto)</div>
+      </div>
+      <div class="angles-row" id="anglesRow"></div>
+      <div class="angle-add">
+        <input type="number" id="newAngle" placeholder="es. 30" step="5" />
+        <button onclick="addAngle()">+ Aggiungi</button>
+      </div>
+      <div style="margin-top:8px">
+        <button onclick="presetStraight()" style="background:#1a2e4a;border:none;border-radius:6px;padding:5px 10px;color:#60a5fa;font-size:12px;cursor:pointer;margin-right:6px">Rettilineo</button>
+        <button onclick="presetCurvy()" style="background:#1a2e4a;border:none;border-radius:6px;padding:5px 10px;color:#60a5fa;font-size:12px;cursor:pointer;margin-right:6px">Curvilinea</button>
+        <button onclick="presetZigzag()" style="background:#1a2e4a;border:none;border-radius:6px;padding:5px 10px;color:#60a5fa;font-size:12px;cursor:pointer">Zigzag</button>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <div class="field">
+      <label>Tempo massimo (secondi)</label>
+      <input type="number" id="maxTime" value="30" min="1" max="300" />
+    </div>
+
+    <div class="field">
+      <label>XTE massimo — soglia uscita di strada (metri)</label>
+      <input type="number" id="maxXTE" value="3" step="0.5" min="0.5" max="10" />
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="field">
+        <label>Velocità min (km/h)</label>
+        <input type="number" id="minSpeed" value="10" />
+      </div>
+      <div class="field">
+        <label>Velocità max (km/h)</label>
+        <input type="number" id="maxSpeed" value="30" />
+      </div>
+    </div>
+
+    <button class="btn-run" id="btnRun" onclick="runSimulation()">▶ Avvia Simulazione</button>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <div class="status-bar">
+      <div id="jobStatusBadge" class="job-status status-idle">In attesa</div>
+      <div>
+        <div id="jobStatusText" style="font-size:14px">Configura e avvia una simulazione</div>
+        <div id="jobIdText" class="job-id"></div>
+      </div>
+    </div>
+
+    <div id="resultsArea">
+      <div class="empty-state">
+        <div class="icon">🛣️</div>
+        <p>I risultati della simulazione appariranno qui</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:8000';
+let angles = [0, 20, -30, 10, -10];
+let pollInterval = null;
+let xteChart = null, speedChart = null, steeringChart = null;
+
+// ── Init ────────────────────────────────────────────────────────────────────
+
+window.onload = () => {
+  renderAngles();
+  drawRoadPreview();
+  checkHealth();
+  setInterval(checkHealth, 5000);
+};
+
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/health`, { signal: AbortSignal.timeout(3000) });
+    const ok = r.ok;
+    document.getElementById('statusDot').className = 'status-dot' + (ok ? '' : ' offline');
+    document.getElementById('serverStatus').textContent = ok ? 'Server online' : 'Server offline';
+  } catch {
+    document.getElementById('statusDot').className = 'status-dot offline';
+    document.getElementById('serverStatus').textContent = 'Server offline';
+  }
+}
+
+// ── Angles ──────────────────────────────────────────────────────────────────
+
+function renderAngles() {
+  const row = document.getElementById('anglesRow');
+  row.innerHTML = angles.map((a, i) => `
+    <div class="angle-chip">
+      <span>${a}°</span>
+      <button onclick="removeAngle(${i})" title="Rimuovi">✕</button>
+    </div>
+  `).join('');
+  drawRoadPreview();
+}
+
+function addAngle() {
+  const v = parseFloat(document.getElementById('newAngle').value);
+  if (isNaN(v)) return;
+  angles.push(v);
+  document.getElementById('newAngle').value = '';
+  renderAngles();
+}
+
+function removeAngle(i) {
+  angles.splice(i, 1);
+  renderAngles();
+}
+
+function presetStraight() { angles = [0, 0, 0, 0, 0, 0]; renderAngles(); }
+function presetCurvy()    { angles = [0, 25, 40, -30, -20, 10, 0]; renderAngles(); }
+function presetZigzag()   { angles = [0, 45, -45, 45, -45, 30, -30]; renderAngles(); }
+
+// ── Road Preview ─────────────────────────────────────────────────────────────
+
+function drawRoadPreview() {
+  const canvas = document.getElementById('roadPreview');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const pts = computeRoadPoints(angles, 40);
+  if (pts.length < 2) return;
+
+  // Normalize to canvas
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 20;
+  const scaleX = (canvas.width - pad*2) / (maxX - minX || 1);
+  const scaleY = (canvas.height - pad*2) / (maxY - minY || 1);
+  const scale = Math.min(scaleX, scaleY);
+
+  const tx = p => pad + (p[0] - minX) * scale;
+  const ty = p => canvas.height - pad - (p[1] - minY) * scale;
+
+  // Road
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 10;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(tx(pts[0]), ty(pts[0]));
+  pts.slice(1).forEach(p => ctx.lineTo(tx(p), ty(p)));
+  ctx.stroke();
+
+  // Center line
+  ctx.strokeStyle = '#7c6ff7';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(tx(pts[0]), ty(pts[0]));
+  pts.slice(1).forEach(p => ctx.lineTo(tx(p), ty(p)));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Start/end dots
+  ctx.fillStyle = '#22c55e';
+  ctx.beginPath();
+  ctx.arc(tx(pts[0]), ty(pts[0]), 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ef4444';
+  ctx.beginPath();
+  ctx.arc(tx(pts[pts.length-1]), ty(pts[pts.length-1]), 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function computeRoadPoints(angles, segLen) {
+  let x = 0, y = 0, dir = Math.PI / 2; // pointing up
+  const pts = [[x, y]];
+  for (const a of angles) {
+    dir += (a * Math.PI) / 180;
+    x += Math.cos(dir) * segLen;
+    y += Math.sin(dir) * segLen;
+    pts.push([x, y]);
+  }
+  return pts;
+}
+
+// ── Simulation ───────────────────────────────────────────────────────────────
+
+async function runSimulation() {
+  if (angles.length === 0) { alert('Aggiungi almeno un angolo'); return; }
+
+  const btn = document.getElementById('btnRun');
+  btn.disabled = true;
+  setStatus('queued', 'In coda...', '');
+  document.getElementById('resultsArea').innerHTML = '<div class="empty-state"><div class="icon">⏳</div><p>Simulazione in coda...</p></div>';
+
+  const body = {
+    angles: angles,
+    maxTime: parseFloat(document.getElementById('maxTime').value),
+    maxXTE: parseFloat(document.getElementById('maxXTE').value),
+    minSpeed: parseFloat(document.getElementById('minSpeed').value),
+    maxSpeed: parseFloat(document.getElementById('maxSpeed').value),
+  };
+
+  try {
+    const r = await fetch(`${API}/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    const jobId = data.jobId;
+    setStatus('queued', 'Simulazione avviata', jobId);
+    pollResult(jobId);
+  } catch (e) {
+    setStatus('error', 'Errore: ' + e.message, '');
+    btn.disabled = false;
+  }
+}
+
+function pollResult(jobId) {
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
+    try {
+      const r = await fetch(`${API}/simulate/${jobId}`);
+      const data = await r.json();
+      handleResult(data, jobId);
+    } catch {}
+  }, 1000);
+}
+
+function handleResult(data, jobId) {
+  const { status } = data;
+
+  if (status === 'queued') {
+    setStatus('queued', 'In coda...', jobId);
+  } else if (status === 'simulating') {
+    setStatus('simulating', 'Simulazione in corso...', jobId);
+    document.getElementById('resultsArea').innerHTML = '<div class="empty-state"><div class="icon" style="animation:pulse 1s infinite;display:inline-block">🚗</div><p>L\'auto sta percorrendo la strada...</p></div>';
+  } else if (status === 'done') {
+    clearInterval(pollInterval);
+    setStatus('done', 'Simulazione completata ✓', jobId);
+    document.getElementById('btnRun').disabled = false;
+    renderResults(data.output);
+  } else if (status === 'error') {
+    clearInterval(pollInterval);
+    setStatus('error', 'Errore: ' + data.error, jobId);
+    document.getElementById('btnRun').disabled = false;
+  }
+}
+
+function setStatus(type, text, jobId) {
+  const badge = document.getElementById('jobStatusBadge');
+  const labels = { queued:'In coda', simulating:'In corso', done:'Completato', error:'Errore', idle:'In attesa' };
+  badge.className = `job-status status-${type}`;
+  badge.textContent = labels[type] || type;
+  document.getElementById('jobStatusText').textContent = text;
+  document.getElementById('jobIdText').textContent = jobId ? `Job ID: ${jobId}` : '';
+}
+
+// ── Results ──────────────────────────────────────────────────────────────────
+
+function renderResults(output) {
+  const xtes      = output.xtes      || [];
+  const speeds    = output.speeds    || [];
+  const steerings = output.steerings || [];
+  const throttles = output.throttles || [];
+  const positions = output.positions || [];
+  const elapsed   = output.elapsedTime || 0;
+  const iters     = output.iterations || 0;
+  const road      = output.road || [];
+
+  const maxXte  = xtes.length  ? Math.max(...xtes.map(Math.abs)).toFixed(2)  : '-';
+  const avgSpd  = speeds.length ? (speeds.reduce((a,b)=>a+b,0)/speeds.length).toFixed(1) : '-';
+  const maxSpd  = speeds.length ? Math.max(...speeds).toFixed(1) : '-';
+  const survived = parseFloat(maxXte) < parseFloat(document.getElementById('maxXTE').value);
+
+  document.getElementById('resultsArea').innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card ${survived ? 'success' : 'danger'}">
+        <div class="val">${survived ? '✓' : '✗'}</div>
+        <div class="label">${survived ? 'In corsia' : 'Uscita di strada'}</div>
+      </div>
+      <div class="stat-card">
+        <div class="val">${elapsed.toFixed(1)}<span class="unit"> s</span></div>
+        <div class="label">Tempo simulazione</div>
+      </div>
+      <div class="stat-card ${parseFloat(maxXte) > 2 ? 'danger' : ''}">
+        <div class="val">${maxXte}<span class="unit"> m</span></div>
+        <div class="label">XTE massimo</div>
+      </div>
+      <div class="stat-card">
+        <div class="val">${avgSpd}<span class="unit"> km/h</span></div>
+        <div class="label">Velocità media</div>
+      </div>
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h4>Cross-Track Error (XTE) — scostamento dalla corsia</h4>
+        <canvas id="xteChart" height="130"></canvas>
+      </div>
+      <div class="chart-card">
+        <h4>Velocità nel tempo</h4>
+        <canvas id="speedChart" height="130"></canvas>
+      </div>
+      <div class="chart-card">
+        <h4>Angolo di sterzo</h4>
+        <canvas id="steeringChart" height="130"></canvas>
+      </div>
+      <div class="road-card">
+        <h4>Percorso dell'auto (vista dall'alto)</h4>
+        <canvas id="trajectoryCanvas" width="340" height="200"></canvas>
+      </div>
+    </div>
+  `;
+
+  const downsample = (arr, n=200) => {
+    if (arr.length <= n) return arr;
+    const step = Math.floor(arr.length / n);
+    return arr.filter((_, i) => i % step === 0);
+  };
+
+  const labels = downsample(xtes).map((_, i) => i);
+
+  const chartDefaults = {
+    responsive: true,
+    animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { display: false },
+      y: { grid: { color: '#2d3148' }, ticks: { color: '#6b7280', font: { size: 11 } } }
+    }
+  };
+
+  // XTE
+  if (xteChart) xteChart.destroy();
+  xteChart = new Chart(document.getElementById('xteChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: downsample(xtes.map(Math.abs)),
+        borderColor: '#ef4444', borderWidth: 1.5,
+        fill: true,
+        backgroundColor: 'rgba(239,68,68,0.1)',
+        pointRadius: 0, tension: 0.3
+      }]
+    },
+    options: { ...chartDefaults,
+      scales: { ...chartDefaults.scales,
+        y: { ...chartDefaults.scales.y,
+          title: { display: true, text: 'XTE (m)', color: '#6b7280', font:{size:11} }
+        }
+      }
+    }
+  });
+
+  // Speed
+  if (speedChart) speedChart.destroy();
+  speedChart = new Chart(document.getElementById('speedChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: downsample(speeds),
+        borderColor: '#7c6ff7', borderWidth: 1.5,
+        fill: true,
+        backgroundColor: 'rgba(124,111,247,0.1)',
+        pointRadius: 0, tension: 0.3
+      }]
+    },
+    options: { ...chartDefaults,
+      scales: { ...chartDefaults.scales,
+        y: { ...chartDefaults.scales.y,
+          title: { display: true, text: 'km/h', color: '#6b7280', font:{size:11} }
+        }
+      }
+    }
+  });
+
+  // Steering
+  if (steeringChart) steeringChart.destroy();
+  steeringChart = new Chart(document.getElementById('steeringChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: downsample(steerings),
+        borderColor: '#fbbf24', borderWidth: 1.5,
+        fill: false,
+        pointRadius: 0, tension: 0.3
+      }]
+    },
+    options: { ...chartDefaults,
+      scales: { ...chartDefaults.scales,
+        y: { ...chartDefaults.scales.y,
+          title: { display: true, text: 'sterzo', color: '#6b7280', font:{size:11} }
+        }
+      }
+    }
+  });
+
+  // Trajectory
+  drawTrajectory(road, positions);
+}
+
+function drawTrajectory(road, positions) {
+  const canvas = document.getElementById('trajectoryCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const allPts = [...(road || []), ...(positions || [])];
+  if (allPts.length === 0) return;
+
+  const xs = allPts.map(p => Array.isArray(p) ? p[0] : p.x || 0);
+  const ys = allPts.map(p => Array.isArray(p) ? (p[2] || p[1]) : p.y || 0);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 20;
+  const scaleX = (canvas.width - pad*2) / (maxX - minX || 1);
+  const scaleY = (canvas.height - pad*2) / (maxY - minY || 1);
+  const scale = Math.min(scaleX, scaleY);
+
+  const tx = v => pad + (v - minX) * scale;
+  const ty = v => canvas.height - pad - (v - minY) * scale;
+
+  const getXY = p => Array.isArray(p)
+    ? [p[0], p[2] !== undefined ? p[2] : p[1]]
+    : [p.x || 0, p.y || 0];
+
+  // Draw road
+  if (road && road.length > 1) {
+    ctx.strokeStyle = '#374151'; ctx.lineWidth = 14;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    const [x0, y0] = getXY(road[0]);
+    ctx.moveTo(tx(x0), ty(y0));
+    road.slice(1).forEach(p => { const [x,y] = getXY(p); ctx.lineTo(tx(x), ty(y)); });
+    ctx.stroke();
+  }
+
+  // Draw car trajectory
+  if (positions && positions.length > 1) {
+    ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    const [x0, y0] = getXY(positions[0]);
+    ctx.moveTo(tx(x0), ty(y0));
+    positions.slice(1).forEach(p => { const [x,y] = getXY(p); ctx.lineTo(tx(x), ty(y)); });
+    ctx.stroke();
+
+    // Last position (car)
+    const last = positions[positions.length - 1];
+    const [lx, ly] = getXY(last);
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath();
+    ctx.arc(tx(lx), ty(ly), 5, 0, Math.PI*2);
+    ctx.fill();
+
+    // Start
+    const [sx, sy] = getXY(positions[0]);
+    ctx.fillStyle = '#7c6ff7';
+    ctx.beginPath();
+    ctx.arc(tx(sx), ty(sy), 5, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Legend
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = '#22c55e'; ctx.fillRect(8, 8, 12, 4);
+  ctx.fillStyle = '#9ca3af'; ctx.fillText('Percorso auto', 24, 15);
+  ctx.fillStyle = '#374151'; ctx.fillRect(8, 20, 12, 4);
+  ctx.fillStyle = '#9ca3af'; ctx.fillText('Strada', 24, 27);
+}
+</script>
+
+</body>
+</html>
