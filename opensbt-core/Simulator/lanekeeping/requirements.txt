@@ -1,0 +1,22 @@
+opensbt == 0.1.4
+setuptools==65.5.0
+wheel==0.38.4
+# numpy==1.22.1
+gym==0.25.0
+opencv-contrib-python==4.8.0.76
+opencv-python==4.8.1.78
+tensorflow==2.9.2
+typing_extensions==4.7.1
+pandas
+Shapely==1.8.1
+matplotlib==3.7.4 # from 3.3.4
+descartes==1.1.0
+python-socketio==4.5.1
+Flask==2.0.0
+
+Flask==2.0.0
+Flask-SocketIO==4.3.1
+python-engineio==3.13.2
+python-socketio==4.5.1
+Werkzeug==2.0.3
+eventlet==0.35.1
