@@ -1,13 +1,20 @@
-version: "3.8"
-
 services:
   simulator:
+    # This stack (tensorflow==2.9.2 + the Unity ubuntu.x86_64 binary) is x86_64 only.
+    # On Apple Silicon / ARM hosts, force amd64 so pip finds the Intel wheels and the
+    # Unity executable can run under emulation. Slower to build/run, but it works.
+    platform: linux/amd64
     build:
       context: . # Where to look for files when building
       dockerfile: Simulator/Dockerfile
     image: paologinefra/se2rp-simulator
+    container_name: se2rp-simulator-chauffeur
     ports:
       - "8000:8000" # Map host:container ports
+    environment:
+      # Model driving this container. Selected at runtime by Simulator/lanekeeping/config.py.
+      # This is the default port-8000 autopilot used by scenario "lane_keeping_chauffeur".
+      - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/mixed-chauffeur.h5
     stdin_open: true # Same as -it (interactive terminal)
     tty: true
     restart: unless-stopped # Optional: auto-restart unless manually stopped

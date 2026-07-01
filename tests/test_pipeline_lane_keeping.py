@@ -248,21 +248,13 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
     print(f"  Fase 2 — Poll parallelo (ThreadPoolExecutor, max_workers={n_samples})")
     print(f"\n  Attendi completamento...\n")
 
-    t0   = time.time()
-    traj = sc.run_simulation(params)   # submit-all → poll-parallel → tensor
+    t0      = time.time()
+    traj    = sc.run_simulation(params, verbose=True)   # stampa ogni job appena finisce
     elapsed = time.time() - t0
 
     all_run_lengths = sc._run_lengths
-
-    print(f"  ✓ Completate {n_samples} simulazioni in {elapsed:.1f}s  "
-          f"({elapsed/n_samples:.1f}s/sim media)\n")
-    for i in range(n_samples):
-        L       = all_run_lengths[i]
-        max_xte = np.abs(traj[i, :L, 2]).max()
-        print(f"  [{i+1:2d}/{n_samples}] angoli=[{','.join(f'{a:.0f}' for a in params[i,:5])}]"
-              f"  speed=[{params[i,5]:.0f},{params[i,6]:.0f}]"
-              f"  seg={params[i,7]:.0f}m  map={params[i,8]:.0f}m"
-              f"  →  {L} step,  XTE max={max_xte:.3f}m")
+    print(f"\n  ✓ Completate {n_samples} simulazioni in {elapsed:.1f}s  "
+          f"({elapsed/n_samples:.1f}s/sim media)")
 
     # ── 3. QoI ───────────────────────────────────────────────────────────────
     print_section("STEP 3 — QoI composita (M1 + M2 + M3)")

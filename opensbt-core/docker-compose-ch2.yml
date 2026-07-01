@@ -1,0 +1,38 @@
+# Second simulator container for the multi-model comparison (Step D).
+#
+# Runs the SAME image as docker-compose.yml but:
+#   - exposes it on host port 8001 (container still listens on 8000 internally)
+#   - loads a DIFFERENT autopilot via the DNN_MODEL_PATH env var
+#
+# Prerequisite: place the second model file in
+#   Simulator/SelfDrivingModels/<your-second-model>.h5
+# (see Simulator/SelfDrivingModels/README.md) and update DNN_MODEL_PATH below
+# to match its filename. The file is baked into the image at build time.
+#
+# Usage (run both models side by side):
+#   cd opensbt-core
+#   docker compose up --build -d                        # chauffeur → :8000
+#   docker compose -f docker-compose-ch2.yml up --build -d   # ch2 → :8001
+#
+# Then, from the repo root:
+#   python compare_models.py --n-samples 200
+#
+# Note: the two compose files build the same image name (paologinefra/se2rp-simulator),
+# so the second `up` reuses the already-built image — both containers therefore
+# contain every model file in SelfDrivingModels/; DNN_MODEL_PATH picks which one loads.
+services:
+  simulator-ch2:
+    platform: linux/amd64   # x86_64-only stack; required on Apple Silicon / ARM hosts
+    build:
+      context: .
+      dockerfile: Simulator/Dockerfile
+    image: paologinefra/se2rp-simulator
+    container_name: se2rp-simulator-ch2
+    ports:
+      - "8001:8000" # host 8001 → container 8000
+    environment:
+      # Change this filename to whichever second model you downloaded/trained.
+      - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/dave2-ch2.h5
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

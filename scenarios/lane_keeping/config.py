@@ -100,7 +100,7 @@ class LaneKeepingScenario(BaseScenario):
 
     # ── Simulation (Step A) ───────────────────────────────────────────────────
 
-    def run_simulation(self, params: np.ndarray) -> np.ndarray:
+    def run_simulation(self, params: np.ndarray, verbose: bool = False) -> np.ndarray:
         """
         Submit N simulation jobs to SimulatorServer and collect results.
 
@@ -148,13 +148,15 @@ class LaneKeepingScenario(BaseScenario):
             job_ids.append(resp.json()["jobId"])
 
         # ── Phase 2: poll all jobs in parallel ────────────────────────────────
-        # ThreadPoolExecutor launches N threads; each thread polls its job until
-        # done. If the SimulatorServer executes jobs sequentially (single Unity
-        # process), the wall-clock saving is the polling overhead (small but free).
-        # If multiple Docker instances are configured, the saving is N × sim_time.
+        # Il server esegue i job in coda sequenziale (singolo processo Unity),
+        # quindi l'ultimo job attende N × sim_time prima di partire.
+        # Usiamo un deadline GLOBALE condiviso tra tutti i thread:
+        #   global_deadline = now + N × DEFAULT_TIMEOUT
+        # così il job in fondo alla coda ha comunque tempo sufficiente.
+        global_deadline = time.time() + N * DEFAULT_TIMEOUT
+
         def _poll(job_id: str) -> dict:
-            deadline = time.time() + DEFAULT_TIMEOUT
-            while time.time() < deadline:
+            while time.time() < global_deadline:
                 poll = requests.get(
                     f"{self.simulator_url}/simulate/{job_id}",
                     timeout=10,
@@ -167,12 +169,37 @@ class LaneKeepingScenario(BaseScenario):
                     )
                 time.sleep(POLL_INTERVAL)
             raise TimeoutError(
-                f"Job {job_id} did not finish within {DEFAULT_TIMEOUT}s. "
+                f"Job {job_id} did not finish within {N * DEFAULT_TIMEOUT}s "
+                f"(N={N} × {DEFAULT_TIMEOUT}s). "
                 "Check that opensbt-core Docker is running and healthy."
             )
 
+        # as_completed permette di stampare il progresso non appena ogni job finisce,
+        # indipendentemente dall'ordine — il contatore mostra quanti sono stati completati.
+        results_ordered = [None] * N
+        completed = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=N) as executor:
-            results = list(executor.map(_poll, job_ids))
+            future_to_idx = {executor.submit(_poll, jid): i
+                             for i, jid in enumerate(job_ids)}
+            for future in concurrent.futures.as_completed(future_to_idx):
+                i      = future_to_idx[future]
+                result = future.result()          # ri-lancia eventuali eccezioni
+                results_ordered[i] = result
+                completed += 1
+                if verbose:
+                    out     = result["output"]
+                    L       = len(out["xtes"])
+                    max_xte = max(abs(x) for x in out["xtes"]) if out["xtes"] else 0.0
+                    row     = params[i]
+                    print(
+                        f"  [{completed:2d}/{N}] (sample #{i+1:2d})"
+                        f"  angoli=[{','.join(f'{int(round(a)):2d}' for a in row[:5])}]"
+                        f"  speed=[{int(round(row[5])):d},{int(round(row[6])):d}]"
+                        f"  seg={int(round(row[7]))}m  map={int(round(row[8]))}m"
+                        f"  →  {L} step,  XTE max={max_xte:.3f}m",
+                        flush=True,
+                    )
+        results = results_ordered
 
         # ── Build all_stats from parallel results ────────────────────────────
         # The SimulatorServer returns parallel arrays, not a list of per-step dicts.
