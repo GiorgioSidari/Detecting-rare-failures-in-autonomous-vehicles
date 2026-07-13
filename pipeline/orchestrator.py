@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 """
 Pipeline orchestrator — scenario-agnostic.
 
@@ -32,6 +34,9 @@ class PipelineResult:
     failure_rate:    float
     rare_failure_rate: float
     param_names:     list[str] = field(default_factory=list)
+    n_degenerate:    int = 0             # run degeneri/abortiti (sottoinsieme dei non validi)
+    n_invalid:       int = 0             # scenari non validi, esclusi da tassi e rare failure
+    valid_mask:      np.ndarray | None = None   # (N,) True = scenario valido
 
     # Derived convenience views
     @property
@@ -62,6 +67,7 @@ def run(
     pod_variance_threshold: float = 0.99,
     param_lower: list[float] | None = None,
     param_upper: list[float] | None = None,
+    verbose: bool = False,
 ) -> PipelineResult:
     """
     Run the full pipeline for a given scenario.
@@ -96,11 +102,18 @@ def run(
     params = scale(unit_samples, bounds["lower"], bounds["upper"])   # (N, d)
 
     # 2. Add nominal (mid-point) sample as first row for reference trajectory
-    nominal = scenario.nominal_params()                               # (1, d)
+    #    Usa i bounds EFFETTIVI (inclusi eventuali override --preset/frontend),
+    #    non scenario.nominal_params() che ricalcola sempre dai default.
+    nominal = ((bounds["lower"] + bounds["upper"]) / 2.0).reshape(1, -1)  # (1, d)
     params_with_nominal = np.vstack([nominal, params])               # (N+1, d)
 
     # 3. Simulate
-    trajectories = scenario.run_simulation(params_with_nominal)      # (N+1, T, D)
+    #    verbose viene inoltrato solo se lo scenario lo supporta (lane_keeping),
+    #    cosi' gli altri scenari restano compatibili.
+    if verbose and 'verbose' in inspect.signature(scenario.run_simulation).parameters:
+        trajectories = scenario.run_simulation(params_with_nominal, verbose=True)  # (N+1, T, D)
+    else:
+        trajectories = scenario.run_simulation(params_with_nominal)      # (N+1, T, D)
     nominal_traj = trajectories[0:1]
     trajectories = trajectories[1:]                                  # (N, T, D)
     params = params_with_nominal[1:]                                 # (N, d)
@@ -108,6 +121,21 @@ def run(
     # 4. QoI
     safety_margins = scenario.compute_qoi(trajectories, params)      # (N,)
     failures = scenario.is_failure(safety_margins)                   # (N,)
+
+    # Info extra prodotte da compute_qoi (se lo scenario le espone):
+    #  - survival: n. step per campione, usato come spareggio dei rare failure
+    #  - n_degenerate: run abortiti (troppo corti), gia' contati come failure
+    survival     = getattr(scenario, "_last_survival", None)
+    n_degenerate = int(getattr(scenario, "_n_degenerate", 0))
+
+    # Maschera di validita': scenari non validi (sim abortite o parametri incoerenti)
+    # sono ESCLUSI da tassi e rare failure, non contati come fallimenti.
+    valid = getattr(scenario, "_valid_mask", None)
+    if valid is None:
+        valid = ~np.isnan(safety_margins)
+    valid = np.asarray(valid, dtype=bool)
+    n_valid   = int(valid.sum())
+    n_invalid = int(getattr(scenario, "_n_invalid", int((~valid).sum())))
 
     # 5. POD embedding — usa x, XTE e steering (canali 0, 2, 3); escludi y
     #    x è monotono lungo la strada e fornisce la struttura temporale dominante
@@ -119,8 +147,9 @@ def run(
     # 6. Rare failure detection
     rare_idx = find_rare_failures(
         safety_margins=safety_margins,
-        failures=failures,
+        failures=failures * valid.astype(float),   # solo fallimenti VALIDI
         fraction=rare_fraction,
+        tiebreak=survival,
     )
 
     return PipelineResult(
@@ -133,7 +162,10 @@ def run(
         rare_failure_idx=rare_idx,
         pod_codes=pod_codes,
         pod_n_modes=pod.nModes,
-        failure_rate=float(failures.mean()),
-        rare_failure_rate=float(len(rare_idx) / n_samples),
+        failure_rate=float(failures[valid].mean()) if n_valid > 0 else 0.0,
+        rare_failure_rate=float(len(rare_idx) / n_valid) if n_valid > 0 else 0.0,
         param_names=bounds["names"],
+        n_degenerate=n_degenerate,
+        n_invalid=n_invalid,
+        valid_mask=valid,
     )
