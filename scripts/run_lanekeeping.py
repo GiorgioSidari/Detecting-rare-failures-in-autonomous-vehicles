@@ -51,6 +51,12 @@ def main() -> None:
                     help="stampa la traccia passo-passo (x, XTE, sterzo) del run peggiore")
     ap.add_argument("--max-speed", type=float, default=None,
                     help="forza il limite superiore di max_speed (m/s) su qualsiasi preset")
+    ap.add_argument("--max-angle", type=float, default=None,
+                    help="forza il limite superiore degli angoli (gradi) su qualsiasi preset")
+    ap.add_argument("--sampling", choices=["uniform", "realistic"], default="realistic",
+                    help="'realistic' = campiona dalla distribuzione operativa (ppf): la "
+                         "frazione di fallimenti stima P(fallimento) sull'ODD; "
+                         "'uniform' = LHS uniforme sui bound (baseline)")
     args = ap.parse_args()
 
     # IMPORTANTE: NUM_WORKERS va impostato PRIMA di importare la pipeline,
@@ -65,19 +71,24 @@ def main() -> None:
     lower = REALISTIC_LOWER if args.preset == "realistic" else None
     upper = REALISTIC_UPPER if args.preset == "realistic" else None
 
-    # Override esplicito della velocita' massima. Richiede bounds espliciti: per il
-    # preset "full" partiamo dai default dello scenario.
-    if args.max_speed is not None:
+    # Override espliciti (velocita'/angolo massimi). Richiedono bounds espliciti:
+    # per il preset "full" partiamo dai default dello scenario.
+    if args.max_speed is not None or args.max_angle is not None:
         if lower is None or upper is None:
             from scenarios import SCENARIOS
             _b = SCENARIOS[args.scenario].param_bounds()
             lower = list(np.asarray(_b["lower"], dtype=float))
             upper = list(np.asarray(_b["upper"], dtype=float))
-        X = float(args.max_speed)
-        upper[6] = X                                     # max_speed (upper)
-        lower[6] = max(1.0, min(lower[6], X - 1.0))
-        upper[5] = min(upper[5], X)                      # min_speed non oltre X
-        lower[5] = max(1.0, min(lower[5], upper[5] - 1.0))
+        if args.max_angle is not None:
+            for _k in range(5):                          # angoli 1..5 (il vero driver)
+                upper[_k] = float(args.max_angle)
+                lower[_k] = min(lower[_k], upper[_k])
+        if args.max_speed is not None:
+            X = float(args.max_speed)
+            upper[6] = X                                 # max_speed (upper)
+            lower[6] = max(1.0, min(lower[6], X - 1.0))
+            upper[5] = min(upper[5], X)                  # min_speed non oltre X
+            lower[5] = max(1.0, min(lower[5], upper[5] - 1.0))
 
     # Sicurezza: nessuna dimensione con lower >= upper (scipy.scale lo rifiuta).
     if lower is not None and upper is not None:
@@ -94,6 +105,11 @@ def main() -> None:
     print(f" Campioni (N)   : {args.n}")
     print(f" Seed           : {args.seed}")
     print(f" Preset bounds   : {args.preset}")
+    print(f" Campionamento   : {args.sampling}"
+          + ("  (distribuzione operativa via ppf)" if args.sampling == "realistic"
+             else "  (LHS uniforme sui bound)"))
+    if args.max_angle is not None:
+        print(f" Max angle (cap) : {args.max_angle} deg")
     if args.max_speed is not None:
         print(f" Max speed (cap) : {args.max_speed} m/s")
     print(f" Worker pool     : {n_workers}  (NUM_WORKERS={n_workers})")
@@ -105,6 +121,7 @@ def main() -> None:
     r = run(args.scenario, n_samples=args.n, seed=args.seed,
             rare_fraction=args.rare_fraction,
             param_lower=lower, param_upper=upper,
+            sampling=args.sampling,
             verbose=not args.quiet)
     dt = time.time() - t0
 
@@ -123,20 +140,79 @@ def main() -> None:
     print(" RISULTATI")
     print(sub)
     print(f" Tempo totale        : {dt:6.1f}s   (~{dt/max(N,1):.1f}s per campione)")
+    n_lowfid = int(getattr(r, "n_low_fidelity", 0))
     inv_note = ""
     if n_invalid:
-        inv_note = f"   ({n_invalid} non validi esclusi" + (f", {n_deg} abortiti)" if n_deg else ")")
+        parts = []
+        if n_deg:
+            parts.append(f"{n_deg} abortiti")
+        if n_lowfid:
+            parts.append(f"{n_lowfid} sotto-campionati")
+        detail = (": " + ", ".join(parts)) if parts else ""
+        inv_note = f"   ({n_invalid} non validi esclusi{detail})"
     print(f" Scenari validi      : {n_valid}/{N}{inv_note}")
     if n_valid == 0:
         print(" Nessuno scenario valido: impossibile calcolare i tassi.")
         print(line)
         return
     n_fail = int((mv < 0).sum())
-    print(f" Failure rate        : {r.failure_rate*100:5.1f}%   ({n_fail}/{n_valid} scenari validi falliti, margin < 0)")
-    print(f" Rare failure rate   : {r.rare_failure_rate*100:5.1f}%   ({n_rare}/{n_valid}, bottom-{args.rare_fraction*100:.0f}% peggiori)")
-    print(f" Safety margin        : min {mv.min():+.3f} | mediana {np.median(mv):+.3f} | max {mv.max():+.3f}")
+    # ── Asse RARITA' (probabilita') ──
+    p_fail = float(getattr(r, "failure_probability", r.failure_rate))
+    ci = getattr(r, "failure_probability_ci", None)
+    odd_lbl = ("ODD realistico" if getattr(r, "sampling", "uniform") == "realistic"
+               else "ODD uniforme")
+    ci_txt = (f"  CI95% [{ci[0]*100:.1f}, {ci[1]*100:.1f}]%"
+              if ci is not None else "")
+    print(f" P(fallimento)       : {p_fail*100:5.1f}%   [{odd_lbl}]"
+          f"   ({n_fail}/{n_valid} falliti){ci_txt}")
+    # ── Asse SEVERITA' (worst-case) ──
+    print(f" Worst-case (severita'): bottom-{args.rare_fraction*100:.0f}% = {n_rare}/{n_valid} scenari"
+          f"   | margine: min {mv.min():+.3f} | mediana {np.median(mv):+.3f} | max {mv.max():+.3f}")
     print(f" Modi POD             : {r.pod_n_modes}")
     print(sub)
+
+    # ── Fedelta' del loop di controllo ────────────────────────────────────────
+    # Quanto velocemente ha girato il loop DNN->Unity per ogni run. Se cala quando
+    # aumenti --workers, la parallelizzazione ti sta togliendo accuratezza: l'auto
+    # percorre piu' metri tra due sterzate e i fallimenti diventano artefatti di CPU,
+    # non del modello. Tienilo alto (pochi metri/step) scegliendo bene i worker; i
+    # run sotto-soglia si escludono con LK_MIN_CONTROL_HZ / LK_MAX_METERS_PER_STEP.
+    chz = getattr(r, "control_hz", None)
+    mps = getattr(r, "meters_per_step", None)
+    if chz is not None and mps is not None:
+        chz = np.asarray(chz, dtype=float); mps = np.asarray(mps, dtype=float)
+        if np.isfinite(chz).any():
+            print(" FEDELTA' DEL CONTROLLO (indipendenza dal carico/worker):")
+            print(f"   Frequenza loop   : min {np.nanmin(chz):5.2f} | mediana "
+                  f"{np.nanmedian(chz):5.2f} | max {np.nanmax(chz):5.2f}  Hz")
+            print(f"   Metri per sterzata: min {np.nanmin(mps):5.2f} | mediana "
+                  f"{np.nanmedian(mps):5.2f} | max {np.nanmax(mps):5.2f}  m/step")
+
+            # ── Split del tempo per step: inferenza vs attesa Unity ──
+            # Dice DOVE va il tempo del loop: se domina 'attesa Unity' il collo di
+            # bottiglia e' il simulatore (I/O), se domina 'inferenza' e' la CPU.
+            im = getattr(r, "infer_ms_per_step", None)
+            wm = getattr(r, "wait_ms_per_step", None)
+            if im is not None and wm is not None:
+                im = np.asarray(im, dtype=float); wm = np.asarray(wm, dtype=float)
+                if np.isfinite(im).any() and np.isfinite(wm).any():
+                    im_med, wm_med = np.nanmedian(im), np.nanmedian(wm)
+                    tot = im_med + wm_med
+                    quota = (wm_med / tot * 100.0) if tot > 0 else float("nan")
+                    print(f"   Tempo/step (mediana): inferenza {im_med:6.1f} ms | "
+                          f"attesa Unity {wm_med:6.1f} ms  "
+                          f"(attesa = {quota:4.1f}% del passo)")
+                    dominante = "Unity/I-O" if wm_med >= im_med else "inferenza/CPU"
+                    print(f"   -> collo di bottiglia: {dominante}")
+
+            n_lowfid = int(getattr(r, "n_low_fidelity", 0))
+            if n_lowfid:
+                print(f"   Esclusi per bassa fedelta': {n_lowfid} "
+                      f"(sotto-campionati: non contano come fallimenti)")
+            else:
+                print("   Gate fedelta' OFF (LK_MIN_CONTROL_HZ/LK_MAX_METERS_PER_STEP=0): "
+                      "solo misura, nessuna esclusione")
+            print(sub)
 
     print(" Margini ordinati (peggiore -> migliore, solo scenari validi):")
     vals = ", ".join(f"{m[i]:+.2f}" for i in order)

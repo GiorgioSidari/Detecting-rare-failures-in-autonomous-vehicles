@@ -46,6 +46,17 @@ def simulationThread():
                 np.float64: float
             })
 
+            # I campi di timing (predictSeconds/stepSeconds) potrebbero non essere
+            # DICHIARATI nella versione installata di UdacitySimulatorIO (se il
+            # pacchetto e' pip-installato separatamente): jsonable_encoder li
+            # scarterebbe. Li iniettiamo qui leggendoli dall'istanza, cosi' arrivano
+            # nel JSON a prescindere dal packaging.
+            for _k in ("predictSeconds", "stepSeconds"):
+                if _k not in output:
+                    _v = getattr(simOutput, _k, None)
+                    if _v is not None:
+                        output[_k] = float(_v)
+
             # Add output to results
             results[jobId] = {"status": "done", "output": output}
         except Exception as e:

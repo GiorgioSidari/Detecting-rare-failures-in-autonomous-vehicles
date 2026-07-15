@@ -27,6 +27,7 @@ NOTE: requires Docker (opensbt-core) to be running:
       docker compose up --build  (in opensbt-core/)
 """
 
+import os
 import numpy as np
 
 from scenarios.base_scenario import BaseScenario
@@ -67,6 +68,29 @@ STEER_RANGE_NORM = 0.4  # normalisation for steering peak deviation: max|s| - me
 EARLY_FRAC      = 0.7   # fraction of MAX_XTE that triggers the "approaching boundary" flag
 MIN_VALID_STEPS = 3     # run piu' corti di cosi' sono degeneri/abortiti
                         # (la sim si e' interrotta subito): non sono guida sicura
+
+# ── Fedelta' del loop di controllo (parallelismo senza perdita di accuratezza) ──
+# Il loop chiude a una certa frequenza: DNN.predict -> env.step -> nuovo frame Unity.
+# Con troppi worker paralleli i container Unity competono per la CPU: il real-time
+# factor cala, il loop gira piu' lento e l'auto percorre PIU' METRI tra due decisioni
+# di sterzo. Il DNN, addestrato a cadenza ~real-time, si ritrova a sterzare su
+# osservazioni vecchie e distanti -> oscillazione/instabilita' e fallimenti che sono
+# ARTEFATTI del carico macchina, non difetti del modello.
+#
+# Misuriamo due indicatori per ogni run (dai dati che il server GIA' restituisce:
+# elapsedTime, iterations, speeds):
+#   control_hz      = iterations / elapsedTime          (frequenza del loop, Hz)
+#   meters_per_step = mean_speed_mps * elapsedTime/iter (risoluzione spaziale, m/step)
+# Un run con control_hz troppo basso o meters_per_step troppo alto e' sotto-campionato:
+# lo marchiamo NON valido (escluso da tassi e rare failure, come i degeneri), cosi' il
+# parallelismo resta ma i risultati NON dipendono da quanti worker giravano.
+#
+# Default = 0 (gate DISATTIVATO, nessun cambio di comportamento): gli indicatori sono
+# comunque calcolati e stampati dal runner, cosi' puoi prima MISURARE la cadenza al
+# variare di --workers e poi scegliere le soglie. Attiva/tara via env:
+#   LK_MIN_CONTROL_HZ=5   LK_MAX_METERS_PER_STEP=2   python scripts/run_lanekeeping.py ...
+MIN_CONTROL_HZ      = float(os.getenv("LK_MIN_CONTROL_HZ", "0"))       # Hz; 0 = off
+MAX_METERS_PER_STEP = float(os.getenv("LK_MAX_METERS_PER_STEP", "0"))  # m/step; 0 = off
 
 
 class LaneKeepingScenario(BaseScenario):
@@ -117,6 +141,18 @@ class LaneKeepingScenario(BaseScenario):
         self._valid_mask: np.ndarray | None = None
         self._n_degenerate: int = 0
         self._n_invalid: int = 0
+        # Fedelta' del loop di controllo, popolata da run_simulation (una voce per
+        # run, allineata a self._run_lengths). None se la sim non le fornisce.
+        self._control_hz: np.ndarray | None = None       # Hz per run
+        self._meters_per_step: np.ndarray | None = None  # m percorsi per decisione
+        self._infer_ms: np.ndarray | None = None         # ms/step in inferenza
+        self._wait_ms: np.ndarray | None = None          # ms/step in attesa Unity
+        # Viste finali (allineate alle N traiettorie) e conteggio, da compute_qoi.
+        self._last_control_hz: np.ndarray | None = None
+        self._last_meters_per_step: np.ndarray | None = None
+        self._last_infer_ms: np.ndarray | None = None
+        self._last_wait_ms: np.ndarray | None = None
+        self._n_low_fidelity: int = 0
 
     # ── Worker pool helpers ───────────────────────────────────────────────────
 
@@ -159,6 +195,52 @@ class LaneKeepingScenario(BaseScenario):
             "lower": np.array([0,   0,   0,   0,   0,   5.0,  10.0, 10.0, 150.0]),
             "upper": np.array([85,  85,  85,  85,  85,  15.0, 30.0, 40.0, 350.0]),
         }
+
+    def param_distributions(self, lower=None, upper=None) -> list:
+        """
+        Distribuzione operativa REALISTICA per ciascun parametro, troncata ai bound
+        effettivi (lower/upper, che possono venire da un preset o dallo sweep).
+
+        Ritorna una lista di distribuzioni scipy.stats CONGELATE, una per dimensione,
+        con supporto in [lower_j, upper_j]. Serve al campionamento distribution-aware
+        (modo 'realistic' in pipeline.orchestrator): trasformando i campioni LHS con
+        dist.ppf() si ottengono scenari pesati secondo quanto sono probabili nella
+        guida reale, cosi' la frazione di fallimenti diventa una stima di P(fallimento)
+        sotto l'ODD -- non piu' una frazione su campionamento uniforme.
+
+        NOTA METODOLOGICA: le forme qui sono un punto di partenza PLAUSIBILE, da
+        calibrare su dati reali/letteratura prima di trarne numeri definitivi.
+          - angoli (0-4): piu' massa sulle curve dolci (half-normal troncata, moda al
+            bordo basso): le curve strette sono rare nella guida reale.
+          - velocita' (5,6): normale troncata centrata su un valore di crociera (~40%
+            del range): si guida piu' spesso a velocita' intermedie che agli estremi.
+          - seg_length (7), map_size (8): uniforme (nessun prior forte).
+        """
+        from scipy import stats
+        b = self.param_bounds()
+        lo = np.asarray(lower if lower is not None else b["lower"], dtype=float)
+        hi = np.asarray(upper if upper is not None else b["upper"], dtype=float)
+
+        def _uniform(a, c):
+            return stats.uniform(loc=a, scale=max(c - a, 1e-9))
+
+        def _truncnorm(a, c, mu, sigma):
+            if sigma <= 0 or c <= a:
+                return _uniform(a, c)
+            return stats.truncnorm((a - mu) / sigma, (c - mu) / sigma,
+                                   loc=mu, scale=sigma)
+
+        dists = []
+        for j in range(len(lo)):
+            a, c = float(lo[j]), float(hi[j])
+            rng = c - a
+            if j < 5:                       # angoli: moda sulle curve dolci
+                dists.append(_truncnorm(a, c, mu=a, sigma=max(rng * 0.5, 1e-6)))
+            elif j in (5, 6):               # velocita': crociera ~40% del range
+                dists.append(_truncnorm(a, c, mu=a + 0.4 * rng, sigma=max(rng * 0.3, 1e-6)))
+            else:                           # seg_length, map_size: uniforme
+                dists.append(_uniform(a, c))
+        return dists
 
     # ── Simulation (Step A) ───────────────────────────────────────────────────
 
@@ -240,6 +322,10 @@ class LaneKeepingScenario(BaseScenario):
         #   output.xtes       : list of float       (cross-track error per step)
         #   output.steerings  : list of float       (steering angle per step)
         all_stats = []
+        control_hz:      list[float] = []
+        meters_per_step: list[float] = []
+        infer_ms:        list[float] = []   # ms/step in inferenza (agent.predict)
+        wait_ms:         list[float] = []   # ms/step in attesa frame Unity (env.step)
         for result in results:
             out = result["output"]
             all_stats.append({
@@ -248,12 +334,47 @@ class LaneKeepingScenario(BaseScenario):
                 "steerings": out["steerings"],   # [float, ...]
             })
 
+            # ── Fedelta' del loop: usa i campi che il server GIA' restituisce ──
+            # elapsedTime = secondi di parete del loop di controllo
+            # iterations  = numero di decisioni di sterzo
+            # speeds      = velocita' per step (km/h: il telemetry fa m/s * 3.6)
+            elapsed = float(out.get("elapsedTime", 0.0) or 0.0)
+            iters   = int(out.get("iterations", 0) or 0)
+            speeds  = out.get("speeds") or []
+            if elapsed > 0.0 and iters > 0:
+                hz = iters / elapsed
+                sec_per_step = elapsed / iters
+                mean_speed_mps = (float(np.mean(speeds)) / 3.6) if len(speeds) else 0.0
+                mps = mean_speed_mps * sec_per_step
+            else:
+                # dati mancanti/degeneri: nessuna misura di fedelta' affidabile
+                hz, mps = float("nan"), float("nan")
+            control_hz.append(hz)
+            meters_per_step.append(mps)
+
+            # ── Split dei tempi per step: DOVE va il tempo del loop di controllo ──
+            # predictSeconds/stepSeconds sono i totali per-run misurati nel loop del
+            # simulatore. Divisi per gli step danno i ms medi/step in inferenza vs
+            # attesa Unity: dice se il collo di bottiglia e' CPU o I/O.
+            pS = out.get("predictSeconds", None)
+            sS = out.get("stepSeconds", None)
+            if iters > 0 and pS is not None and sS is not None and pS >= 0 and sS >= 0:
+                infer_ms.append(float(pS) / iters * 1000.0)
+                wait_ms.append(float(sS) / iters * 1000.0)
+            else:
+                infer_ms.append(float("nan"))
+                wait_ms.append(float("nan"))
+
         # ── Build zero-padded trajectory tensor (N, T_max, 4) ────────────────
         #    Zero-padding is safe for the POD embedder (SVD handles zeros).
         #    self._run_lengths lets compute_qoi() mask out padded timesteps
         #    so M2/M3 statistics are computed only on real simulation steps.
         run_lengths = [len(s["xtes"]) for s in all_stats]
         self._run_lengths = run_lengths
+        self._control_hz = np.asarray(control_hz, dtype=float)
+        self._meters_per_step = np.asarray(meters_per_step, dtype=float)
+        self._infer_ms = np.asarray(infer_ms, dtype=float)
+        self._wait_ms = np.asarray(wait_ms, dtype=float)
         T_max = max(run_lengths)
 
         traj = np.zeros((N, T_max, 4), dtype=np.float32)
@@ -352,15 +473,41 @@ class LaneKeepingScenario(BaseScenario):
         else:
             bad_params = np.zeros(len(survival), dtype=bool)
 
+        # ── Fedelta' del loop di controllo ────────────────────────────────────
+        # Un run girato a frequenza troppo bassa (troppi worker in contesa CPU) e'
+        # sotto-campionato: l'auto ha percorso troppi metri tra due decisioni di
+        # sterzo. Non e' un test fedele del modello -> NON valido (come i degeneri),
+        # cosi' i tassi restano indipendenti da quanti worker giravano.
+        # Allinea alla coda come _run_lengths (il campione 'nominale' e' in testa).
+        def _tail(arr):
+            if arr is None:
+                return None
+            arr = np.asarray(arr, dtype=float)
+            return arr[-N:] if arr.shape[0] >= N else np.full(N, np.nan)
+
+        control_hz = _tail(self._control_hz)
+        meters_per_step = _tail(self._meters_per_step)
+        self._last_infer_ms = _tail(self._infer_ms)
+        self._last_wait_ms = _tail(self._wait_ms)
+
+        low_fidelity = np.zeros(len(survival), dtype=bool)
+        if MIN_CONTROL_HZ > 0 and control_hz is not None:
+            low_fidelity |= np.nan_to_num(control_hz, nan=np.inf) < MIN_CONTROL_HZ
+        if MAX_METERS_PER_STEP > 0 and meters_per_step is not None:
+            low_fidelity |= np.nan_to_num(meters_per_step, nan=0.0) > MAX_METERS_PER_STEP
+
         # I run NON validi sono misurazioni da escludere dall'analisi: margine = NaN
         # cosi' non contano ne' come safe ne' come failure. L'orchestrator calcola
         # i tassi e i rare failure solo sugli scenari validi.
-        invalid = degenerate | bad_params
+        invalid = degenerate | bad_params | low_fidelity
         qoi = np.where(invalid, np.nan, qoi)
 
         self._last_survival = survival
+        self._last_control_hz = control_hz
+        self._last_meters_per_step = meters_per_step
         self._valid_mask = ~invalid
         self._n_degenerate = int(degenerate.sum())
+        self._n_low_fidelity = int(low_fidelity.sum())
         self._n_invalid = int(invalid.sum())
 
         return qoi
