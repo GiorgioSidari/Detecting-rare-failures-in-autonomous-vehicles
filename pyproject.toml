@@ -16,6 +16,9 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "pydantic>=2.0",
+    "opencv-python",
+    "scikit-learn",
+    "requests",
 ]
 
 [tool.setuptools.packages.find]

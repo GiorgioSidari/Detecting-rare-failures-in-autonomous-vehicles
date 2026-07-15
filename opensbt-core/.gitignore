@@ -54,6 +54,12 @@ Simulator/SimulatorExec/*
 #Model
 Simulator/SelfDrivingModels/*
 
+#CARLA (Phase 0 spike — cut-in/emergency-braking, ~7GB package, fetched locally, never committed)
+CarlaSimulator/*
+CarlaSimulator_0916/
+!CarlaSimulator/.gitkeep
+scenario_runner/
+
 unitylog.txt
 
 !.gitkeep

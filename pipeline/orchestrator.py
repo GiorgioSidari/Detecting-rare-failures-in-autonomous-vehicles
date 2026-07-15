@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-import inspect
-
 """
 Pipeline orchestrator — scenario-agnostic.
 
@@ -10,6 +6,9 @@ Given a scenario name and sampling config, runs the full pipeline:
 
 Returns a PipelineResult that the API serialises and the frontend renders.
 """
+from __future__ import annotations
+
+import inspect
 import numpy as np
 from dataclasses import dataclass, field
 from scipy.stats.qmc import LatinHypercube, scale
@@ -37,6 +36,7 @@ class PipelineResult:
     n_degenerate:    int = 0             # run degeneri/abortiti (sottoinsieme dei non validi)
     n_invalid:       int = 0             # scenari non validi, esclusi da tassi e rare failure
     valid_mask:      np.ndarray | None = None   # (N,) True = scenario valido
+    nominal_trajectory: np.ndarray | None = None  # (1, T, D) — mid-point params reference run
 
     # Derived convenience views
     @property
@@ -52,11 +52,6 @@ class PipelineResult:
     @property
     def safe_trajectories(self) -> np.ndarray:
         return self.trajectories[self.failures == 0]
-
-    @property
-    def nominal_trajectory(self) -> np.ndarray:
-        """Single trajectory at mid-point params (used as green reference)."""
-        return self.trajectories[0:1]   # set during run() — see orchestrator
 
 
 def run(
@@ -137,10 +132,11 @@ def run(
     n_valid   = int(valid.sum())
     n_invalid = int(getattr(scenario, "_n_invalid", int((~valid).sum())))
 
-    # 5. POD embedding — usa x, XTE e steering (canali 0, 2, 3); escludi y
-    #    x è monotono lungo la strada e fornisce la struttura temporale dominante
-    #    y è posizione laterale assoluta, ridondante con XTE → rimossa
-    traj_pod = trajectories[:, :, [0, 2, 3]]                       # (N, T, 3): x + xte + steering
+    # 5. POD embedding — canali dichiarati dallo scenario (default: tutti).
+    #    lane_keeping seleziona [0,2,3] (x + xte + steering, esclude y ridondante);
+    #    scenari a 2 canali come cut_in/emergency_braking usano tutto lo stato.
+    channels = scenario.pod_channels()
+    traj_pod = trajectories if channels is None else trajectories[:, :, channels]
     pod = EmbedderPOD(variance_threshold=pod_variance_threshold)
     pod_codes = pod.fit_transform(traj_pod)                         # (N, k)
 
@@ -168,4 +164,5 @@ def run(
         n_degenerate=n_degenerate,
         n_invalid=n_invalid,
         valid_mask=valid,
+        nominal_trajectory=nominal_traj,
     )

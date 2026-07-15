@@ -27,21 +27,19 @@ NOTE: requires Docker (opensbt-core) to be running:
       docker compose up --build  (in opensbt-core/)
 """
 
-import os
-import time
-import queue
-import threading
-import concurrent.futures
 import numpy as np
-import requests
 
 from scenarios.base_scenario import BaseScenario
+from simulators.common.http_worker_pool import (
+    build_pool_from_env,
+    healthy_workers,
+    run_job_pool,
+    DEFAULT_JOB_TIMEOUT,
+)
 
 # ── Simulator connection ──────────────────────────────────────────────────────
 SIMULATOR_URL   = "http://localhost:8000"   # default SimulatorServer FastAPI base URL
-DEFAULT_TIMEOUT = 90      # seconds to wait for a SINGLE simulation job (per-job, not global)
-POLL_INTERVAL   = 0.5     # seconds between GET polling requests
-HEALTH_TIMEOUT  = 5       # seconds for the /health probe of each worker
+DEFAULT_TIMEOUT = DEFAULT_JOB_TIMEOUT       # seconds to wait for a SINGLE simulation job (per-job, not global)
 
 # Default number of parallel simulator containers (worker pool).
 # Override at runtime with NUM_WORKERS, or pass explicit SIMULATOR_URLS.
@@ -50,24 +48,15 @@ DEFAULT_NUM_WORKERS = 4
 
 def build_simulator_pool() -> list[str]:
     """
-    Resolve the pool of SimulatorServer endpoints used for parallel execution.
-
-    Priority:
-      1. SIMULATOR_URLS  — comma-separated explicit URLs
-                           (e.g. "http://localhost:8000,http://localhost:8001").
-      2. NUM_WORKERS     — builds localhost:BASE .. BASE+N-1
-                           (BASE = SIMULATOR_BASE_PORT, default 8000).
+    Resolve the pool of SimulatorServer endpoints used for parallel execution
+    (see simulators/common/http_worker_pool.build_pool_from_env for priority
+    order: SIMULATOR_URLS > NUM_WORKERS/SIMULATOR_BASE_PORT > default).
 
     Il numero di worker DEVE combaciare con i container avviati da
     docker-compose.parallel.yml (vedi opensbt-core/gen_parallel_compose.py).
     Worker non raggiungibili vengono comunque scartati a runtime dall'health-check.
     """
-    explicit = os.getenv("SIMULATOR_URLS")
-    if explicit:
-        return [u.strip().rstrip("/") for u in explicit.split(",") if u.strip()]
-    n    = int(os.getenv("NUM_WORKERS", str(DEFAULT_NUM_WORKERS)))
-    base = int(os.getenv("SIMULATOR_BASE_PORT", "8000"))
-    return [f"http://localhost:{base + i}" for i in range(max(1, n))]
+    return build_pool_from_env(default_num_workers=DEFAULT_NUM_WORKERS)
 
 # ── Physical constants ────────────────────────────────────────────────────────
 MAX_XTE         = 2.5   # metres — matches opensbt-core/Simulator/lanekeeping/config.py
@@ -146,19 +135,7 @@ class LaneKeepingScenario(BaseScenario):
 
     def _healthy_workers(self, verbose: bool = False) -> list[str]:
         """Ritorna solo i worker che rispondono a GET /health."""
-        healthy: list[str] = []
-        for url in self.simulator_urls:
-            try:
-                r = requests.get(f"{url}/health", timeout=HEALTH_TIMEOUT)
-                if r.ok:
-                    healthy.append(url)
-                elif verbose:
-                    print(f"[pool] {url} risponde ma non healthy "
-                          f"({r.status_code}) — ignorato", flush=True)
-            except requests.RequestException:
-                if verbose:
-                    print(f"[pool] {url} non raggiungibile — ignorato", flush=True)
-        return healthy
+        return healthy_workers(self.simulator_urls, verbose=verbose)
 
     # ── Parameter space ───────────────────────────────────────────────────────
 
@@ -229,81 +206,32 @@ class LaneKeepingScenario(BaseScenario):
             ports = ", ".join(u.split(":")[-1] for u in workers)
             print(f"[pool] {len(workers)} worker attivi (porte: {ports})", flush=True)
 
-        # ── Coda di lavoro condivisa: un thread per worker ────────────────────
+        # ── Coda di lavoro condivisa: un thread per worker (simulators/common) ─
         # Ogni thread possiede UN container e cicla: prende un indice, POSTa il
         # job su quel container, attende il risultato (poll), passa al successivo.
         # Così ogni container ha al più 1 job in coda: niente serializzazione
-        # nascosta lato server.
-        task_q: "queue.Queue[int]" = queue.Queue()
-        for i in range(N):
-            task_q.put(i)
-
-        results_ordered: list[dict | None] = [None] * N
-        progress_lock = threading.Lock()
-        completed = 0
-
-        def _run_one(url: str, idx: int) -> dict:
-            resp = requests.post(f"{url}/simulate", json=payloads[idx], timeout=10)
-            if not resp.ok:
-                raise RuntimeError(
-                    f"POST /simulate fallita su {url} ({resp.status_code}).\n"
-                    f"Payload: {payloads[idx]}\nRisposta: {resp.text}"
-                )
-            job_id = resp.json()["jobId"]
-            deadline = time.time() + DEFAULT_TIMEOUT      # timeout PER-JOB
-            while time.time() < deadline:
-                poll = requests.get(f"{url}/simulate/{job_id}", timeout=10).json()
-                status = poll.get("status")
-                if status == "done":
-                    return poll
-                if status == "error":
-                    raise RuntimeError(
-                        f"Errore simulatore ({url}) job {job_id}: {poll.get('error')}"
-                    )
-                time.sleep(POLL_INTERVAL)
-            raise TimeoutError(
-                f"Job {job_id} su {url} non completato entro {DEFAULT_TIMEOUT}s "
-                f"(sample #{idx + 1}). Il container potrebbe essere bloccato su Unity."
+        # nascosta lato server. Timeout PER-JOB (DEFAULT_TIMEOUT), non un
+        # deadline globale N×timeout.
+        def _on_progress(completed: int, total: int, idx: int, url: str, result: dict) -> None:
+            if not verbose:
+                return
+            out     = result["output"]
+            L       = len(out["xtes"])
+            max_xte = max((abs(x) for x in out["xtes"]), default=0.0)
+            row     = params[idx]
+            print(
+                f"  [{completed:2d}/{total}] (sample #{idx+1:2d} @ "
+                f"porta {url.split(':')[-1]})"
+                f"  angoli=[{','.join(f'{int(round(a)):2d}' for a in row[:5])}]"
+                f"  →  {L} step,  XTE max={max_xte:.3f}m",
+                flush=True,
             )
 
-        def _worker(url: str) -> None:
-            nonlocal completed
-            while True:
-                try:
-                    idx = task_q.get_nowait()
-                except queue.Empty:
-                    return
-                try:
-                    result = _run_one(url, idx)
-                    results_ordered[idx] = result
-                    with progress_lock:
-                        completed += 1
-                        if verbose:
-                            out     = result["output"]
-                            L       = len(out["xtes"])
-                            max_xte = max((abs(x) for x in out["xtes"]), default=0.0)
-                            row     = params[idx]
-                            print(
-                                f"  [{completed:2d}/{N}] (sample #{idx+1:2d} @ "
-                                f"porta {url.split(':')[-1]})"
-                                f"  angoli=[{','.join(f'{int(round(a)):2d}' for a in row[:5])}]"
-                                f"  →  {L} step,  XTE max={max_xte:.3f}m",
-                                flush=True,
-                            )
-                finally:
-                    task_q.task_done()
-
-        errors: list[BaseException] = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as executor:
-            futures = [executor.submit(_worker, url) for url in workers]
-            for future in concurrent.futures.as_completed(futures):
-                exc = future.exception()
-                if exc is not None:
-                    errors.append(exc)
-        if errors:
-            raise errors[0]     # fail-fast: propaga il primo errore/timeout
-
-        results = results_ordered
+        results = run_job_pool(
+            payloads, workers,
+            job_timeout=DEFAULT_TIMEOUT,
+            on_progress=_on_progress,
+        )
 
         # ── Build all_stats from parallel results ────────────────────────────
         # The SimulatorServer returns parallel arrays, not a list of per-step dicts.
@@ -439,3 +367,7 @@ class LaneKeepingScenario(BaseScenario):
 
     def failure_threshold(self) -> float:
         return 0.0
+
+    def pod_channels(self) -> list[int] | None:
+        # x (temporal structure) + xte + steering; y is redundant with xte.
+        return [0, 2, 3]

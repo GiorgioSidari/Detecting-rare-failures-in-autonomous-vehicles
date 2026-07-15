@@ -94,3 +94,14 @@ class BaseScenario(ABC):
         """
         bounds = self.param_bounds()
         return ((bounds["lower"] + bounds["upper"]) / 2.0).reshape(1, -1)
+
+    def pod_channels(self) -> list[int] | None:
+        """
+        Trajectory channels (last axis of run_simulation's output) fed to the
+        POD embedder. None (default) means "use every channel" — correct for
+        scenarios whose D channels are all part of the state (e.g. emergency
+        braking's [position, velocity]). Override when only a subset is
+        meaningful for shape-based embedding (e.g. lane_keeping drops the
+        redundant y channel — see scenarios/lane_keeping/config.py).
+        """
+        return None
