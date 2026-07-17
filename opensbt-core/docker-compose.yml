@@ -8,12 +8,12 @@ services:
       context: . # Where to look for files when building
       dockerfile: Simulator/Dockerfile
     image: paologinefra/se2rp-simulator
-    container_name: se2rp-simulator-chauffeur
+    container_name: se2rp-simulator
     ports:
       - "8000:8000" # Map host:container ports
     environment:
       # Model driving this container. Selected at runtime by Simulator/lanekeeping/config.py.
-      # This is the default port-8000 autopilot used by scenario "lane_keeping_chauffeur".
+      # This is the default port-8000 autopilot used by the "lane_keeping" scenario.
       - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/mixed-chauffeur.h5
     stdin_open: true # Same as -it (interactive terminal)
     tty: true
