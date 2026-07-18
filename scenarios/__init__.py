@@ -20,6 +20,7 @@ import os
 from scenarios.emergency_braking import EmergencyBrakingScenario
 from scenarios.cut_in import CutInScenario
 from scenarios.lane_keeping import LaneKeepingScenario
+from scenarios.lane_keeping_md import LaneKeepingMetaDriveScenario
 
 _NN_MODEL_PATH = os.path.join(
     os.path.dirname(__file__), "emergency_braking", "models", "emergency_braking_mlp.keras"
@@ -33,6 +34,9 @@ SCENARIOS: dict = {
 
     # Lane-keeping (default port 8000)
     "lane_keeping": LaneKeepingScenario(),
+
+    # Lane-keeping on MetaDrive (in-process, headless, no Docker; Step A / A1)
+    "lane_keeping_md": LaneKeepingMetaDriveScenario(),
 }
 
 
