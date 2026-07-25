@@ -1,14 +1,15 @@
 """
 Run the active-learning failure-boundary learner (Step B) on a scenario.
 
-Defaults to the MetaDrive lane-keeping scenario in the discriminative regime
-(speed_scale=0.4), where failures depend on scenario difficulty and there is a
-real boundary to learn. Prints P(failure) with a credible interval and the ARD
-parameter importance (which parameters drive the failure).
+Runs on the Unity lane-keeping scenario (the real Udacity DNN via opensbt-core).
+Prints P(failure) with a credible interval and the ARD parameter importance
+(which parameters drive the failure). Backend-agnostic: works on any scenario
+exposing the BaseScenario interface.
 
-Run:
+Run (needs the opensbt-core simulator pool up, see README):
     python scripts/run_active_boundary.py
     python scripts/run_active_boundary.py --n-seed 60 --batch 20 --n-iter 10
+    python scripts/run_active_boundary.py --max-angle 8 --max-speed 10 --max-seg 14
 """
 from __future__ import annotations
 
@@ -17,6 +18,9 @@ import warnings
 
 import numpy as np
 from sklearn.exceptions import ConvergenceWarning
+
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scenarios import SCENARIOS
 from pipeline.active_boundary import run_active_boundary
@@ -28,18 +32,13 @@ warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scenario", default="lane_keeping_md")
-    ap.add_argument("--speed-scale", type=float, default=0.4,
-                    help="target-speed scale for the discriminative regime (MetaDrive)")
+    ap.add_argument("--scenario", default="lane_keeping")
     ap.add_argument("--n-seed", type=int, default=40, help="initial LHS evaluations")
     ap.add_argument("--batch", type=int, default=16, help="points per active iteration")
     ap.add_argument("--n-iter", type=int, default=8, help="active-learning iterations")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--uniform", action="store_true",
                     help="estimate P over a uniform ODD instead of param_distributions")
-    ap.add_argument("--learned-model", default=None,
-                    help="path to a trained BC model; drive with LearnedDriver "
-                         "(genuine generalization failures instead of an analytic driver)")
     ap.add_argument("--max-angle", type=float, default=None,
                     help="narrow the ODD: cap all 5 road angles (deg) — gentler curves")
     ap.add_argument("--max-speed", type=float, default=None,
@@ -53,14 +52,7 @@ def main() -> None:
     args = ap.parse_args()
 
     sc = SCENARIOS[args.scenario]
-    if hasattr(sc, "speed_scale"):
-        sc.speed_scale = args.speed_scale
-        print(f"[scenario] {args.scenario}  speed_scale={args.speed_scale}")
-
-    if args.learned_model:
-        from scenarios.lane_keeping_md.bc_controller import LearnedDriver
-        sc._driver_factory = lambda: LearnedDriver(model_path=args.learned_model)
-        print(f"[driver] LearnedDriver <- {args.learned_model}")
+    print(f"[scenario] {args.scenario}")
 
     # Optionally narrow the operational design domain (ODD) to make failures rare.
     b = sc.param_bounds()

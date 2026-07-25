@@ -10,12 +10,10 @@ Two checks, on the real scenario:
    the simulation budget, for plain MC COUNTING vs the GP SURROGATE (fit on the
    same points, then integrate the smooth P(fail|theta) over the ODD). The
    surrogate should reach a given accuracy with fewer simulations. This part
-   REUSES the brute-force simulations (no extra MetaDrive runs), so it is cheap.
+   REUSES the brute-force simulations (no extra runs), so it is cheap.
 
-Run (needs MetaDrive):
+Run (needs the opensbt-core simulator pool up, see README):
     python scripts/validate_active_boundary.py --n-bf 200
-    python scripts/validate_active_boundary.py --n-bf 200 \
-        --learned-model scenarios/lane_keeping_md/models/bc_state_mlp.joblib --speed-scale 0.3
 """
 from __future__ import annotations
 
@@ -25,6 +23,9 @@ import warnings
 import numpy as np
 from scipy.stats.qmc import LatinHypercube
 from sklearn.exceptions import ConvergenceWarning
+
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scenarios import SCENARIOS
 from pipeline.active_boundary import run_active_boundary, _build_gp, _p_fail
@@ -73,9 +74,7 @@ def surrogate_p(theta_tr, y_tr, lower, upper, odd_pts, thr) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scenario", default="lane_keeping_md")
-    ap.add_argument("--speed-scale", type=float, default=0.3)
-    ap.add_argument("--learned-model", default=None)
+    ap.add_argument("--scenario", default="lane_keeping")
     ap.add_argument("--n-bf", type=int, default=200, help="brute-force MC simulations")
     ap.add_argument("--n-seed", type=int, default=30)
     ap.add_argument("--batch", type=int, default=12)
@@ -84,12 +83,6 @@ def main() -> None:
     args = ap.parse_args()
 
     sc = SCENARIOS[args.scenario]
-    if hasattr(sc, "speed_scale"):
-        sc.speed_scale = args.speed_scale
-    if args.learned_model:
-        from scenarios.lane_keeping_md.bc_controller import LearnedDriver
-        sc._driver_factory = lambda: LearnedDriver(model_path=args.learned_model)
-        print(f"[driver] LearnedDriver <- {args.learned_model}")
     b = sc.param_bounds()
     lower, upper = np.asarray(b["lower"], float), np.asarray(b["upper"], float)
     thr = float(sc.failure_threshold())

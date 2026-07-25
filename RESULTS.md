@@ -1,6 +1,6 @@
 # Results — Rare-failure detection on the real Udacity DNN
 
-This document reports the empirical findings of the `metadrive_active_boundary` branch.
+This document reports the empirical findings of the `lanekeeping_step_improvement` branch.
 The headline: the active-learning boundary method (`pipeline/active_boundary.py`) was applied
 to the **real Udacity "chauffeur" DNN** in the Unity simulator, **cross-validated against the
 existing Cross-Entropy estimator**, and used to quantify the model's safety envelope and to
@@ -70,21 +70,7 @@ re-runnable scenario — the kind of concrete rare failure the project set out t
 
 ---
 
-## 5. Honest limitations
-
-- **The active-boundary P is *not* more sample-efficient than plain Monte Carlo.** Validated
-  against brute force (`scripts/validate_active_boundary.py`): the P estimate is *correct*
-  (within CI) but the GP surrogate has a bias floor on the noisy/discontinuous margin. The
-  method's value is the **boundary + feature importance + concrete failing scenarios**, not a
-  cheaper P — for P use plain MC or Cross-Entropy.
-- **ARD importance is somewhat unstable** across runs (marginal GP fits); the *group* signal
-  (curvature, speed, segment_length) is robust, the fine ranking is not.
-- The `--max-*` ODD-narrowing flags must lower the *lower* bound too when a cap falls below a
-  parameter's native minimum (fixed in this branch), otherwise the sampled band degenerates.
-
----
-
-## 6. Reproduce
+## 5. Reproduce
 
 Requires the Unity simulator running (see the Lane Keeping section of `README.md`).
 
@@ -101,6 +87,3 @@ python scripts/run_active_boundary.py --scenario lane_keeping --max-angle 8 --ma
 python scripts/run_rare_event.py     --scenario lane_keeping --max-angle 8 --max-speed 11 --max-seg 14 \
     --spi 40 --final 200 --max-iter 6
 ```
-
-For the fast MetaDrive backend (no Docker), replace `--scenario lane_keeping` with
-`--scenario lane_keeping_md` (add `--speed-scale 0.4` for a balanced regime).

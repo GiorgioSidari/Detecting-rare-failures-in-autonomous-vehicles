@@ -4,7 +4,7 @@ Tests for the active-learning boundary learner (Step B).
 Uses a MOCK scenario with a KNOWN analytic boundary (fail iff p0 + p1 > c), so we
 can check that the learner (a) recovers P(failure) close to the ground truth and
 (b) identifies the two relevant parameters via ARD importance — all WITHOUT
-MetaDrive or the scenario registry (the mock is a plain duck-typed object).
+any simulator or the scenario registry (the mock is a plain duck-typed object).
 
 Run:  pytest tests/test_active_boundary.py -q
 """

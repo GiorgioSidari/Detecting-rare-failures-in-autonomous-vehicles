@@ -25,7 +25,7 @@ Method
 
 Backend-agnostic: uses only the BaseScenario interface (param_bounds,
 param_distributions, run_simulation, compute_qoi, failure_threshold), so it runs
-on the MetaDrive scenario (fast, practical) exactly as on any other.
+on the Unity lane-keeping scenario (the real Udacity DNN) exactly as on any other.
 """
 from __future__ import annotations
 

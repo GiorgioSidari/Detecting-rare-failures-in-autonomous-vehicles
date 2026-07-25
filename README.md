@@ -81,11 +81,6 @@ scenarios/
     models/             # ← generated, not in git
   cut_in/               # Blocco 2 (in development)
   lane_keeping/         # Blocco 3 (Udacity DNN, requires Docker)
-  lane_keeping_md/      # MetaDrive backend (in-process, no Docker) + learned BC driver
-    config.py           #   LaneKeepingMetaDriveScenario (same BaseScenario contract)
-    map_builder.py      #   9 params -> road curvature/speed (pure, testable)
-    driver.py           #   PurePursuitDriver (+ optional degradations)
-    bc_controller.py    #   learned BC state controller (sklearn MLP) + LearnedDriver
   base_scenario.py      # abstract BaseScenario interface
   __init__.py           # SCENARIOS registry
 
@@ -124,14 +119,9 @@ scripts/
   envelope_lanekeeping.py # P(failure) vs meters-per-steer curve (operational envelope)
   validate_rare_probability.py # in-process validation of the P estimate + Wilson CI
   validate_rare_event.py       # in-process validation of the Cross-Entropy estimator
-  # --- MetaDrive backend & active-learning boundary (feature branch) ---
-  run_active_boundary.py   # active-learning boundary; works on ANY scenario (incl. real DNN)
-  run_lanekeeping_md.py    # MetaDrive lane-keeping batch + control-rate sweep
-  train_bc_md.py           # train the BC state controller from a teacher on MetaDrive
+  # --- active-learning boundary (feature branch) ---
+  run_active_boundary.py   # active-learning boundary on the Unity DNN (any BaseScenario)
   validate_active_boundary.py # active-boundary P vs brute-force MC (correctness + efficiency)
-  plot_boundary_md.py      # plot the learned fail/safe boundary (curvature x speed)
-  smoke_lanekeeping_md.py  # MetaDrive glue smoke test
-  diag_geometry_md.py / diag_curve_api.py # MetaDrive geometry diagnostics
 ```
 
 ---
@@ -169,7 +159,6 @@ The **safety margin** = `detection_distance - final_position - 2 m`. Negative = 
 | Emergency Braking | ✅ | ✅ (train first) | nothing |
 | Cut-In | 🚧 Blocco 2 | 🚧 Blocco 2 | nothing |
 | Lane Keeping | ✅ (existing) | ✅ (existing Udacity DNN) | Docker (opensbt-core) |
-| Lane Keeping (MetaDrive) | ✅ (pure-pursuit) | ✅ (learned BC) | `pip install metadrive-simulator` (no Docker) |
 
 ---
 
@@ -285,39 +274,26 @@ Emergency Braking and Cut-In do **not** require Docker.
 
 ---
 
-## MetaDrive backend & active-learning boundary (feature branch)
+## Active-learning of the failure boundary (feature branch)
 
-This branch adds, on top of the existing pipeline, a faster simulator backend and a method that *learns* where a controller fails, then applies both to the real Udacity DNN. Everything is **additive** — the existing scenarios and pipeline are untouched, and the new scenario plugs into the same `BaseScenario` interface. See `RESULTS.md` for the empirical findings and `SPECIFICHE_A_MetaDrive_B_ActiveBoundary.md` (kept outside the repo) for the full design notes.
+On top of the existing pipeline this branch adds a method that *learns* where the controller fails and applies it to the real Udacity DNN. It is **additive** — the existing scenarios and pipeline are untouched — and plugs into the same `BaseScenario` interface. See `RESULTS.md` for the empirical findings.
 
-### A — MetaDrive scenario (`lane_keeping_md`)
+### Method (`pipeline/active_boundary.py`)
 
-An in-process, headless simulator (no Docker, no rendering in the loop) that mirrors the Unity lane-keeping contract (same 9 params, same `(N,T,4)` trajectories, same composite QoI). Its key property: the **control rate is an exact config parameter** — `control_hz = 1/(decision_repeat · physics_world_step_size)` — so `meters_per_step` is deterministic and can be *swept* as a variable (impossible on Unity, where it emerges from rendering speed). One-time setup: `pip install metadrive-simulator` then `python -m metadrive.pull_asset`. Smoke test: `python scripts/smoke_lanekeeping_md.py`.
-
-Two drivers are available (dependency-injected):
-- **pure-pursuit** (default) — robust analytic controller.
-- **learned BC** (`bc_controller.py`) — a small sklearn MLP trained by behavioral cloning of the teacher **only on an easy ODD** (gentle curves, low speed); it extrapolates poorly outside that support, so its failures are *genuine generalization errors*. Train with `python scripts/train_bc_md.py`, use with `--learned-model <path>`.
-
-> Note: the BC controller uses scikit-learn (not Keras) on purpose — TensorFlow's native runtime conflicts with panda3d/MetaDrive in the same process on Windows.
-
-### B — Active-learning of the failure boundary (`pipeline/active_boundary.py`)
-
-Where `run()` gives severity (bottom-k%) and `run_rare_event()` gives rarity (P), this learns **where and why** a scenario fails: a Gaussian-Process model of the safety margin over the parameter space, refined by sampling adaptively near the fail/safe boundary. It returns P(failure) with a credible interval, the ARD **feature importance** (which parameters drive the failure), and the concrete failing scenarios. It is **backend-agnostic**: it runs on the MetaDrive scenario *and* on the real Unity DNN (`--scenario lane_keeping`).
+Where `run()` gives severity (bottom-k%) and `run_rare_event()` gives rarity (P), this learns **where and why** a scenario fails: a Gaussian-Process model of the safety margin over the parameter space, refined by sampling adaptively near the fail/safe boundary. It returns P(failure) with a credible interval, the ARD **feature importance** (which parameters drive the failure), and the concrete failing scenarios. It is **backend-agnostic**: it runs on the real Unity DNN (`--scenario lane_keeping`) exactly as on any `BaseScenario`.
 
 ```bash
-python scripts/run_active_boundary.py --scenario lane_keeping_md --speed-scale 0.4   # fast, MetaDrive
-python scripts/run_active_boundary.py --scenario lane_keeping                        # real DNN (needs Docker)
+python scripts/run_active_boundary.py --scenario lane_keeping                  # real DNN (needs Docker)
+python scripts/run_active_boundary.py --scenario lane_keeping --max-angle 8 --max-speed 10 --max-seg 14
 ```
 
 Both `run_active_boundary.py` and `run_rare_event.py` accept ODD-narrowing flags to target the rare regime: `--max-angle`, `--max-speed`, `--min-speed`, `--max-seg`, `--min-seg`. Narrowing the ODD until failures become rare is how a genuine rare failure is surfaced (see `RESULTS.md`).
 
-### C — What it produced on the real model
+### What it produced on the real model
 
 Applied to the real Udacity DNN in Unity, the active-boundary method was **cross-validated against the existing Cross-Entropy estimator** (they agree on P at the same ODD), and used to **quantify the model's safety envelope in speed** and to extract concrete, reproducible **rare-failure scenarios** (P ≈ 2% at 9–10 m/s). Full numbers in `RESULTS.md`.
 
-### Validation & plots
+### Validation
 
 - `python scripts/validate_active_boundary.py` — active-boundary P vs brute-force Monte Carlo (correctness confirmed; the GP surrogate is **not** more sample-efficient than plain MC for estimating P — an honest limitation, so the method's value is the boundary + importance, not the P estimate).
-- `python scripts/plot_boundary_md.py --out boundary.png` — plots the learned fail/safe boundary on the (curvature, speed) plane.
-- Tests: `pytest tests/test_lane_keeping_md.py tests/test_active_boundary.py tests/test_bc_controller.py -q`.
-
-Adds one dependency: `scikit-learn` (in `pyproject.toml`). Model files are git-ignored (`scenarios/lane_keeping_md/models/`).
+- Tests: `pytest tests/test_active_boundary.py -q`.
