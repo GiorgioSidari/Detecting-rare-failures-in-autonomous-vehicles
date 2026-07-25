@@ -48,6 +48,10 @@ def main() -> None:
                     help="cap angles (deg): narrows the ODD toward the rare regime")
     ap.add_argument("--min-speed", type=float, default=None,
                     help="cap min_speed (m/s): with a low --max-speed avoids overlapping bands")
+    ap.add_argument("--max-seg", type=float, default=None,
+                    help="cap segment_length (m): narrows the ODD toward the rare regime")
+    ap.add_argument("--min-seg", type=float, default=None,
+                    help="raise the segment_length lower bound (m)")
     ap.add_argument("--workers", type=int, default=None,
                     help="parallel workers/containers (default: NUM_WORKERS env or 4)")
     ap.add_argument("--spi", type=int, default=60, help="CE samples_per_iter (default 60)")
@@ -73,7 +77,8 @@ def main() -> None:
     # Explicit overrides to target a narrower ODD (rare regime). They require explicit bounds:
     # for the 'full' preset we start from the scenario defaults.
     if (args.max_speed is not None or args.max_angle is not None
-            or args.min_speed is not None):
+            or args.min_speed is not None or args.max_seg is not None
+            or args.min_seg is not None):
         if lower is None or upper is None:
             _b = SCENARIOS[args.scenario].param_bounds()
             lower = list(np.asarray(_b["lower"], dtype=float))
@@ -94,6 +99,12 @@ def main() -> None:
             Y = float(args.min_speed)
             upper[5] = Y                                     # min_speed upper
             lower[5] = max(0.5, min(lower[5], Y - 1.0))
+        if args.max_seg is not None:
+            upper[7] = float(args.max_seg)                   # segment_length upper
+            lower[7] = min(lower[7], upper[7])
+        if args.min_seg is not None:
+            lower[7] = float(args.min_seg)                   # segment_length lower
+            upper[7] = max(upper[7], lower[7])
         for i in range(len(lower)):                          # keep lower < upper
             if upper[i] <= lower[i]:
                 upper[i] = lower[i] + 1e-6
@@ -113,6 +124,10 @@ def main() -> None:
         print(f" Max speed (cap): {args.max_speed} m/s")
     if args.min_speed is not None:
         print(f" Min speed (cap): {args.min_speed} m/s")
+    if args.max_seg is not None:
+        print(f" Max seg (cap)  : {args.max_seg} m")
+    if args.min_seg is not None:
+        print(f" Min seg (cap)  : {args.min_seg} m")
     print(" Sampling       : adaptive Cross-Entropy + importance sampling")
     print(f" CE budget      : {args.spi}/iter x max {args.max_iter} iter + {args.final} final "
           f"(<= {budget_max} runs)")

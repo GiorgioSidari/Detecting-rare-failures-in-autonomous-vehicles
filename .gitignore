@@ -35,3 +35,4 @@ scenarios/*/models/
 # OS
 .DS_Store
 Thumbs.db
+scenarios/lane_keeping_md/models/
