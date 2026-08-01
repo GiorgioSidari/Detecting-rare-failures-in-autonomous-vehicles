@@ -1,0 +1,64 @@
+# --- GENERATO da gen_parallel_compose.py ------------
+# 4 simulatori in parallelo su porte host 8000..8003 (container: sempre 8000).
+# Avvio:  docker compose -f docker-compose.parallel.yml up --build
+# Il client deve usare lo stesso numero di worker: NUM_WORKERS=4
+services:
+
+  simulator-0:
+    platform: linux/amd64
+    # Solo questo servizio ha 'build': l'immagine viene costruita una volta
+    # e riutilizzata da tutti gli altri worker (stesso tag paologinefra/se2rp-simulator).
+    build:
+      context: .
+      dockerfile: Simulator/Dockerfile
+    image: paologinefra/se2rp-simulator
+    container_name: se2rp-simulator-0
+    ports:
+      - "8000:8000"
+    environment:
+      - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/mixed-chauffeur.h5
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+  simulator-1:
+    platform: linux/amd64
+    image: paologinefra/se2rp-simulator
+    container_name: se2rp-simulator-1
+    ports:
+      - "8001:8000"
+    environment:
+      - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/mixed-chauffeur.h5
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    depends_on:
+      - simulator-0
+
+  simulator-2:
+    platform: linux/amd64
+    image: paologinefra/se2rp-simulator
+    container_name: se2rp-simulator-2
+    ports:
+      - "8002:8000"
+    environment:
+      - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/mixed-chauffeur.h5
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    depends_on:
+      - simulator-0
+
+  simulator-3:
+    platform: linux/amd64
+    image: paologinefra/se2rp-simulator
+    container_name: se2rp-simulator-3
+    ports:
+      - "8003:8000"
+    environment:
+      - DNN_MODEL_PATH=./Simulator/SelfDrivingModels/mixed-chauffeur.h5
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    depends_on:
+      - simulator-0

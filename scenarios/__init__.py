@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Scenario registry.
 
@@ -28,7 +30,9 @@ SCENARIOS: dict = {
     # Use NN simulator if the model has been trained, otherwise fall back to physics
     "emergency_braking": EmergencyBrakingScenario(use_nn=_nn_trained),
     "cut_in":            CutInScenario(),
-    "lane_keeping":      LaneKeepingScenario(),
+
+    # Lane-keeping (default port 8000)
+    "lane_keeping": LaneKeepingScenario(),
 }
 
 

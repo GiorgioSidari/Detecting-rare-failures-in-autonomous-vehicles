@@ -1,21 +1,24 @@
 """
-Rare failure detection.
+Severity axis: rank the worst failures.
 
-Definition used: the bottom-k% of safety_margins among failures.
-These are the cases that not only crashed, but crashed the hardest —
-statistically the most extreme outcomes in the dataset.
+Definition: the bottom-k% of safety margins among the failures — the cases that
+crashed the hardest (the extreme tail of the outcome distribution). This is
+DISTINCT from the rarity axis (the probability P(failure) under the ODD),
+estimated in orchestrator.run / rare_event / active_boundary.
 """
+from __future__ import annotations
 
 import numpy as np
 
 
-def find_rare_failures(
+def find_severe_failures(
     safety_margins: np.ndarray,
     failures: np.ndarray,
     fraction: float = 0.05,
+    tiebreak: np.ndarray | None = None,
 ) -> np.ndarray:
     """
-    Return indices of the rarest (worst) failures.
+    Return indices of the most severe (worst) failures.
 
     Parameters
     ----------
@@ -34,9 +37,18 @@ def find_rare_failures(
     if len(failure_idx) == 0:
         return np.array([], dtype=int)
 
-    # Sort failures by safety_margin ascending (most negative = worst first)
-    sorted_by_margin = failure_idx[np.argsort(safety_margins[failure_idx])]
+    margins_sub = safety_margins[failure_idx]
+    if tiebreak is not None:
+        # Primary: margin ascending (more negative = worse). Secondary: 'tiebreak' ascending.
+        # When the QoI saturates (car off-road, XTE capped) many failures share the same margin;
+        # we use survival time (n. steps) as the tie-breaker, so among equivalent crashes the ones
+        # that leave the lane earlier rank as more severe.
+        tb_sub = np.asarray(tiebreak, dtype=float)[failure_idx]
+        order = np.lexsort((tb_sub, margins_sub))
+    else:
+        order = np.argsort(margins_sub)
 
+    sorted_by_margin = failure_idx[order]
     k = max(1, int(np.ceil(len(sorted_by_margin) * fraction)))
     return sorted_by_margin[:k]
 

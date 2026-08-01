@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.schemas import RunRequest, ScenarioInfo, StatusResponse, ExplainResponse
 from scenarios import SCENARIOS
-from pipeline.rare_failures import summarise_rare_params
+from pipeline.severity import summarise_rare_params
 import pipeline.orchestrator as orchestrator
 
 app = FastAPI(title="Rare Failure Detection API", version="0.1.0")

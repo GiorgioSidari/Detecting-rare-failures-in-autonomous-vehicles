@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 LSTM controller for the Cut-In scenario.
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 
 
@@ -5,9 +7,10 @@ class EmbedderPOD:
     """
     Proper Orthogonal Decomposition (POD) embedder for trajectory data.
 
-    Compresses (N, T, 2) trajectories into (N, nModes) codes using SVD,
+    Compresses (N, T, D) trajectories into (N, nModes) codes using SVD,
     selecting the minimum number of modes to explain >= variance_threshold
-    of the total variance.
+    of the total variance. D is the number of state channels (2 for emergency
+    braking, 4 for lane keeping: x, y, xte, steering).
     """
 
     def __init__(self, variance_threshold: float = 0.99):
@@ -24,20 +27,23 @@ class EmbedderPOD:
 
         Parameters
         ----------
-        trajectories : (N, T, 2)
+        trajectories : (N, T, D)
+            D can be any number of state dimensions (e.g. 2 for emergency braking,
+            4 for lane-keeping where channels are [x, y, xte, steering]).
 
         Returns
         -------
         self
         """
-        N, T, _ = trajectories.shape
+        N, T, D = trajectories.shape
         self.T = T
+        self.D = D
 
         # 1. Flatten + center
-        # Each trajectory (T, 2) becomes a single vector of length T*2.
+        # Each trajectory (T, D) becomes a single vector of length T*D.
         # Subtracting the mean removes the "average trajectory" so SVD focuses
         # purely on how trajectories differ from one another, not their shared shape.
-        flat = trajectories.reshape(N, T * 2)
+        flat = trajectories.reshape(N, T * D)
         self.mean_trajectory = flat.mean(axis=0)
         flat_centered = flat - self.mean_trajectory
 
@@ -63,7 +69,7 @@ class EmbedderPOD:
 
         Parameters
         ----------
-        trajectories : (N, T, 2)
+        trajectories : (N, T, D)
 
         Returns
         -------
@@ -91,7 +97,7 @@ class EmbedderPOD:
 
         Returns
         -------
-        trajectories : (N, T, 2)
+        trajectories : (N, T, D)
         """
         # 5. Reconstruct — reverse the projection
         # Multiply coordinates by the basis vectors to get back to the full
@@ -101,7 +107,7 @@ class EmbedderPOD:
         self._check_fitted()
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
             flat = codes @ self.V_reduced + self.mean_trajectory
-        return flat.reshape(len(codes), self.T, 2)
+        return flat.reshape(len(codes), self.T, self.D)
 
     def fit_transform(self, trajectories: np.ndarray) -> np.ndarray:
         """Fit the embedder and return codes for the training trajectories."""
