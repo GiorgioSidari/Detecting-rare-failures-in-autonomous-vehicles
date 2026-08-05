@@ -16,6 +16,7 @@ orchestrator excludes them from the rates: degenerate (too few steps), incoheren
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -83,10 +84,17 @@ def composite_lane_qoi(
     xte_m      = np.where(valid, xte,      np.nan)
     steering_m = np.where(valid, steering, np.nan)
 
-    m1 = MAX_XTE - np.nanmax(np.abs(xte_m), axis=1)                              # (N,)
+    # A run of length 0 (a job lost to a stuck simulator, see run_simulation) has no
+    # valid timestep at all, so its row is entirely NaN and the nan-aware reductions
+    # warn about an empty slice. NaN is the answer we want — the run is marked
+    # invalid a few lines below — so silence the expected warning rather than the bug.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                message="All-NaN|Mean of empty slice")
+        m1 = MAX_XTE - np.nanmax(np.abs(xte_m), axis=1)                          # (N,)
 
-    steer_abs  = np.abs(steering_m)
-    steer_peak = np.nanmax(steer_abs, axis=1) - np.nanmean(steer_abs, axis=1)
+        steer_abs  = np.abs(steering_m)
+        steer_peak = np.nanmax(steer_abs, axis=1) - np.nanmean(steer_abs, axis=1)
     m2 = -np.clip(steer_peak / STEER_RANGE_NORM, 0.0, 1.0)                       # (N,) in [-1, 0]
 
     near = np.abs(xte_m) > EARLY_FRAC * MAX_XTE

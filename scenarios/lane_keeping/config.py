@@ -48,6 +48,28 @@ DEFAULT_TIMEOUT = 90      # seconds to wait for a SINGLE simulation job (per-job
 POLL_INTERVAL   = 0.5     # seconds between GET polling requests
 HEALTH_TIMEOUT  = 5       # seconds for the /health probe of each worker
 
+# ── Fault tolerance ───────────────────────────────────────────────────────────
+# A container whose Unity instance hangs still answers GET /health, so the health
+# probe cannot see it: it accepts jobs and never finishes them. Without retries a
+# single such container aborts the whole batch, which on a multi-hour campaign
+# throws away every simulation already paid for.
+#   MAX_JOB_RETRIES     - how many times a failed sample is re-queued (on a
+#                         different worker, since the failing one gets skipped).
+#   MAX_WORKER_FAILURES - consecutive failures after which a worker is dropped
+#                         from the pool (for the rest of the session, see
+#                         QUARANTINE_PERSISTS). The last worker is never dropped.
+# A sample that exhausts its retries is returned as an EMPTY run: the QoI marks
+# it invalid (too few steps) and it is excluded from the rates, exactly like an
+# aborted simulation. Set LK_MAX_JOB_RETRIES=0 to restore the old fail-fast.
+MAX_JOB_RETRIES     = int(os.getenv("LK_MAX_JOB_RETRIES", "2"))
+MAX_WORKER_FAILURES = int(os.getenv("LK_MAX_WORKER_FAILURES", "2"))
+# A quarantined worker stays out for the whole SESSION, not just the batch that
+# caught it. A dead container does not heal between batches, so re-admitting it
+# every time costs MAX_WORKER_FAILURES x DEFAULT_TIMEOUT of pure waiting per
+# batch — on a campaign with hundreds of batches that dwarfs the useful work.
+# Set LK_QUARANTINE_PERSIST=0 to go back to per-batch quarantine.
+QUARANTINE_PERSISTS = os.getenv("LK_QUARANTINE_PERSIST", "1") != "0"
+
 # Default number of parallel simulator containers (worker pool).
 # Override at runtime with NUM_WORKERS, or pass explicit SIMULATOR_URLS.
 DEFAULT_NUM_WORKERS = 4
@@ -135,6 +157,12 @@ class LaneKeepingScenario(BaseScenario):
         self._valid_mask: np.ndarray | None = None
         self._n_degenerate: int = 0
         self._n_invalid: int = 0
+        # Jobs lost to timeouts/errors after every retry (see MAX_JOB_RETRIES).
+        # They are reported as invalid, never as failures.
+        self._n_job_failures: int = 0
+        self._last_job_errors: dict = {}
+        # Workers dropped for the rest of the session (see QUARANTINE_PERSISTS).
+        self._quarantined: set = set()
         # Control-loop fidelity, populated by run_simulation (one entry per run, aligned to
         # self._run_lengths). None if the sim does not provide it.
         self._control_hz: np.ndarray | None = None       # Hz per run
@@ -163,10 +191,19 @@ class LaneKeepingScenario(BaseScenario):
             "maxXTE":    MAX_XTE,
         }
 
+    def reset_quarantine(self) -> None:
+        """Re-admit every worker dropped earlier (call after restarting a container)."""
+        self._quarantined.clear()
+
     def _healthy_workers(self, verbose: bool = False) -> list[str]:
-        """Return only the workers that respond to GET /health."""
+        """Workers that answer GET /health and are not under session quarantine."""
         healthy: list[str] = []
         for url in self.simulator_urls:
+            if url in self._quarantined:
+                if verbose:
+                    print(f"[pool] {url} in quarantena da un batch precedente — ignorato",
+                          flush=True)
+                continue
             try:
                 r = requests.get(f"{url}/health", timeout=HEALTH_TIMEOUT)
                 if r.ok:
@@ -178,6 +215,64 @@ class LaneKeepingScenario(BaseScenario):
                 if verbose:
                     print(f"[pool] {url} non raggiungibile — ignorato", flush=True)
         return healthy
+
+    def probe_workers(self, timeout: float = 60.0, prune: bool = True,
+                      verbose: bool = True) -> dict:
+        """
+        Send ONE trivial simulation to each worker and see which actually finish.
+
+        GET /health only proves the FastAPI layer is alive; a container whose Unity
+        instance is hung passes it and then swallows every job. Before a campaign
+        that costs hours, one real job per container is worth the minute it takes.
+
+        prune : drop the workers that fail from self.simulator_urls, so the rest of
+                the session simply never talks to them.
+
+        Returns {url: "ok" | "<error>"}.
+        """
+        payload = {"angles": [0, 0, 0, 0, 0], "minSpeed": 6, "maxSpeed": 12,
+                   "segLength": 25, "map_size": 250, "maxTime": 10, "maxXTE": MAX_XTE}
+        status: dict = {}
+
+        def _probe(url: str) -> tuple:
+            try:
+                resp = requests.post(f"{url}/simulate", json=payload, timeout=10)
+                if not resp.ok:
+                    return url, f"POST /simulate -> {resp.status_code}"
+                job_id = resp.json()["jobId"]
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    poll = requests.get(f"{url}/simulate/{job_id}", timeout=10).json()
+                    if poll.get("status") == "done":
+                        return url, "ok"
+                    if poll.get("status") == "error":
+                        return url, f"errore simulatore: {poll.get('error')}"
+                    time.sleep(POLL_INTERVAL)
+                return url, f"nessuna risposta entro {timeout:.0f}s (Unity bloccato?)"
+            except Exception as exc:
+                return url, f"{type(exc).__name__}: {exc}"
+
+        self.reset_quarantine()      # a fresh probe overrules earlier verdicts
+        candidates = self._healthy_workers(verbose=verbose)
+        if verbose:
+            print(f"[preflight] provo una simulazione su {len(candidates)} worker...",
+                  flush=True)
+        if candidates:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(candidates)) as ex:
+                for url, msg in ex.map(_probe, candidates):
+                    status[url] = msg
+        for url in self.simulator_urls:
+            status.setdefault(url, "non raggiungibile (/health fallita)")
+
+        good = [u for u, m in status.items() if m == "ok"]
+        if verbose:
+            for url in self.simulator_urls:
+                mark = "OK  " if status[url] == "ok" else "KO  "
+                print(f"[preflight] {mark}{url}  {status[url]}", flush=True)
+        if prune and good:
+            self.simulator_urls = good
+            self.simulator_url = good[0]
+        return status
 
     # ── Parameter space ───────────────────────────────────────────────────────
 
@@ -300,6 +395,10 @@ class LaneKeepingScenario(BaseScenario):
         results_ordered: list[dict | None] = [None] * N
         progress_lock = threading.Lock()
         completed = 0
+        attempts = [0] * N                      # retries already spent per sample
+        job_errors: dict[int, str] = {}         # sample -> last error, once it gave up
+        active_workers = set(workers)           # workers still trusted right now
+        pool_lock = threading.Lock()
 
         def _run_one(url: str, idx: int) -> dict:
             resp = requests.post(f"{url}/simulate", json=payloads[idx], timeout=10)
@@ -325,15 +424,49 @@ class LaneKeepingScenario(BaseScenario):
                 f"(sample #{idx + 1}). Il container potrebbe essere bloccato su Unity."
             )
 
+        def _give_up_or_retry(url: str, idx: int, exc: BaseException) -> None:
+            """Re-queue a failed sample, or record it as lost once retries run out."""
+            with progress_lock:
+                attempts[idx] += 1
+                retry = attempts[idx] <= MAX_JOB_RETRIES
+                if retry:
+                    task_q.put(idx)
+                else:
+                    job_errors[idx] = f"{type(exc).__name__}: {exc}"
+                tag = "riprovo" if retry else "ABBANDONATO"
+                print(f"  [!] sample #{idx + 1} su {url.split(':')[-1]}: "
+                      f"{type(exc).__name__} — {tag} "
+                      f"(tentativo {attempts[idx]}/{MAX_JOB_RETRIES + 1})", flush=True)
+
+        def _quarantine(url: str) -> bool:
+            """Drop a repeatedly failing worker, unless it is the last one standing."""
+            with pool_lock:
+                if len(active_workers) <= 1:
+                    return False
+                active_workers.discard(url)
+                scope = "per il resto della sessione" if QUARANTINE_PERSISTS \
+                    else "per questo batch"
+                if QUARANTINE_PERSISTS:
+                    self._quarantined.add(url)
+                print(f"  [!] worker {url} escluso dal pool {scope} "
+                      f"({MAX_WORKER_FAILURES} fallimenti consecutivi). "
+                      f"Restano {len(active_workers)} worker.", flush=True)
+                return True
+
         def _worker(url: str) -> None:
             nonlocal completed
+            consecutive_failures = 0
             while True:
+                with pool_lock:
+                    if url not in active_workers:
+                        return
                 try:
                     idx = task_q.get_nowait()
                 except queue.Empty:
                     return
                 try:
                     result = _run_one(url, idx)
+                    consecutive_failures = 0
                     results_ordered[idx] = result
                     with progress_lock:
                         completed += 1
@@ -349,19 +482,57 @@ class LaneKeepingScenario(BaseScenario):
                                 f"  →  {L} step,  XTE max={max_xte:.3f}m",
                                 flush=True,
                             )
+                except (TimeoutError, RuntimeError, requests.RequestException) as exc:
+                    consecutive_failures += 1
+                    _give_up_or_retry(url, idx, exc)
+                    if consecutive_failures >= MAX_WORKER_FAILURES:
+                        # `finally` still runs on the way out, so task_done() is
+                        # accounted for exactly once.
+                        if _quarantine(url):
+                            return
                 finally:
                     task_q.task_done()
 
-        errors: list[BaseException] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as executor:
             futures = [executor.submit(_worker, url) for url in workers]
             for future in concurrent.futures.as_completed(futures):
                 exc = future.exception()
-                if exc is not None:
-                    errors.append(exc)
-        if errors:
-            raise errors[0]     # fail-fast: propagate the first error/timeout
+                if exc is not None:      # a bug in the worker loop itself, not a job failure
+                    raise exc
 
+        # A sample re-queued just as the pool drained can be left behind: sweep the
+        # remainder sequentially on whichever workers are still trusted.
+        leftovers: list[int] = []
+        while True:
+            try:
+                leftovers.append(task_q.get_nowait())
+            except queue.Empty:
+                break
+        for idx in leftovers:
+            for url in (sorted(active_workers) or workers):
+                try:
+                    results_ordered[idx] = _run_one(url, idx)
+                    break
+                except (TimeoutError, RuntimeError, requests.RequestException) as exc:
+                    job_errors[idx] = f"{type(exc).__name__}: {exc}"
+
+        n_ok = sum(r is not None for r in results_ordered)
+        if n_ok == 0:
+            distinct = sorted(set(job_errors.values()))[:3]
+            raise RuntimeError(
+                f"Nessuna delle {N} simulazioni è andata a buon fine su "
+                f"{len(workers)} worker. Errori tipici:\n  "
+                + "\n  ".join(distinct)
+                + "\nControlla i container (docker ps / docker logs): un'istanza Unity "
+                  "bloccata risponde a /health ma non completa mai un job."
+            )
+        if job_errors:
+            print(f"  [!] {len(job_errors)}/{N} simulazioni perse dopo "
+                  f"{MAX_JOB_RETRIES} tentativi: marcate come non valide "
+                  f"ed escluse dai tassi.", flush=True)
+
+        self._n_job_failures = len(job_errors)
+        self._last_job_errors = dict(job_errors)
         results = results_ordered
 
         # Build all_stats from the parallel results. The server returns parallel arrays — positions
@@ -372,6 +543,17 @@ class LaneKeepingScenario(BaseScenario):
         infer_ms:        list[float] = []   # ms/step in inference (agent.predict)
         wait_ms:         list[float] = []   # ms/step waiting for the Unity frame (env.step)
         for result in results:
+            if result is None:
+                # Sample lost after every retry. An empty run has length 0, which
+                # composite_lane_qoi treats as degenerate -> margin NaN -> excluded
+                # from the rates. It is NOT counted as a failure: we simply have no
+                # evidence either way for this parameter point.
+                all_stats.append({"positions": [], "xtes": [], "steerings": []})
+                control_hz.append(float("nan"))
+                meters_per_step.append(float("nan"))
+                infer_ms.append(float("nan"))
+                wait_ms.append(float("nan"))
+                continue
             out = result["output"]
             all_stats.append({
                 "positions": out["positions"],   # [[x,y,z], ...]

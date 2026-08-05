@@ -97,6 +97,14 @@ pipeline/
   severity.py           # find_severe_failures() (severity axis, bottom-k%)
   rare_event.py         # Cross-Entropy + importance sampling P(failure) estimator
   active_boundary.py    # active-learning of the fail/safe boundary (GP + ARD importance)
+  # --- sampling-design comparison (feature branch) ---
+  samplers.py               # BaseSampler / LHSSampler / RandomSampler, one interface
+  active_boundary_random.py # active boundary as a class, LHS or random design
+  rare_event_random.py      # Cross-Entropy as a class, LHS or random design
+  failure_regions.py        # cluster failure regions, compare them, price a blind hit
+  model_comparison.py       # run every arm at a matched budget and report
+  qoi_optimizer.py          # worst-case search: minimise the QoI (BayesOpt / CMA-ES)
+  odd_presets.py            # ODD presets + the --max-angle/--max-speed narrowing rules
 
 api/
   server.py             # FastAPI: /scenarios /run /status /explain /health
@@ -122,6 +130,10 @@ scripts/
   # --- active-learning boundary (feature branch) ---
   run_active_boundary.py   # active-learning boundary on the Unity DNN (any BaseScenario)
   validate_active_boundary.py # active-boundary P vs brute-force MC (correctness + efficiency)
+  # --- sampling-design comparison (feature branch) ---
+  run_model_comparison.py     # all arms at a matched budget + failure-region report (Docker)
+  run_qoi_optimizer.py        # worst-case search on the QoI (Docker)
+  validate_model_comparison.py # Docker-free validation of the whole comparison
 ```
 
 ---
@@ -297,3 +309,83 @@ Applied to the real Udacity DNN in Unity, the active-boundary method was **cross
 
 - `python scripts/validate_active_boundary.py` — active-boundary P vs brute-force Monte Carlo (correctness confirmed; the GP surrogate is **not** more sample-efficient than plain MC for estimating P — an honest limitation, so the method's value is the boundary + importance, not the P estimate).
 - Tests: `pytest tests/test_active_boundary.py -q`.
+
+---
+
+## LHS vs random search, and the worst case (feature branch `random_search_comparison`)
+
+Three additions, all **additive**: no existing module changes behaviour, and every new class
+speaks the same `BaseScenario` interface as the rest of the pipeline.
+
+### 1. The same algorithms on a random design
+
+`pipeline/samplers.py` puts the two designs behind one interface (`LHSSampler`, `RandomSampler`),
+and the algorithms are re-exposed as classes that take one:
+
+| class | module | design |
+|---|---|---|
+| `LHSActiveBoundary` / `RandomSearchActiveBoundary` | `pipeline/active_boundary_random.py` | seed design + acquisition pool |
+| `LHSCrossEntropy` / `RandomSearchCrossEntropy` | `pipeline/rare_event_random.py` | every CE batch |
+| `PlainSamplingBaseline` | `pipeline/model_comparison.py` | one-shot sampling, the floor |
+
+Budgets are matched by construction, and the final ODD integration stays stratified in **both**
+arms so the comparison measures the search, not the quadrature.
+
+> Note worth knowing: `pipeline/rare_event.py` never used LHS — it draws with `rvs`, i.e. it is
+> already i.i.d. random sampling. So for Cross-Entropy the *new* arm is the stratified one, and
+> `RandomSearchCrossEntropy` reproduces today's behaviour. Stratifying matters there because
+> gamma is a quantile of the sampled margins: an unstratified batch that misses the tail sends
+> the whole descent toward the wrong mode.
+
+### 2. Do the methods find the same failure regions?
+
+`pipeline/failure_regions.py` clusters the failing points (DBSCAN in the normalised cube, isolated
+failures kept as their own region) into one **shared** map built from the union of all arms, then
+reports per pair the Jaccard index of the discovered regions and a clustering-free point-coverage
+measure. For each region it also prices a blind hit: `P(hit)`, `P(hit in n draws)` and `n50`, the
+number of blind draws needed for an even chance. `pipeline/model_comparison.py` runs the campaign
+over several seeds and prints/saves the whole thing (`.json` + two `.csv`).
+
+```bash
+python scripts/run_model_comparison.py --budget 120 --seeds 0 1 2        # needs Docker
+python scripts/run_model_comparison.py --preset realistic --max-angle 20 --out results/cmp
+python scripts/validate_model_comparison.py                              # no Docker, ~2 min
+```
+
+### 3. Worst-case search on the QoI
+
+`pipeline/qoi_optimizer.py` minimises the safety margin — `argmin margin(theta)` — with either a
+GP + Expected Improvement (`BayesianQoIOptimizer`, most sample-efficient) or a self-contained
+CMA-ES (`CMAESQoIOptimizer`, evaluates a full generation per step, so it fills the worker pool).
+Both plug into the comparison harness as extra arms.
+
+```bash
+python scripts/run_qoi_optimizer.py --method bayes --budget 120
+python scripts/run_qoi_optimizer.py --compare --budget 120
+```
+
+The minimiser is the **worst** case, not the **likeliest** one: read it next to the rare-event
+probability, never instead of it.
+
+### What the validation actually shows
+
+`scripts/validate_model_comparison.py` measures the LHS advantage directly, on regions defined by
+1, 2 and 4 parameters (n = 64 points, 400 replications):
+
+| failure region | volume | i.i.d. analytic | LHS | random |
+|---|---|---|---|---|
+| 1 axis, `\|p2-0.42\|<0.01` | 0.0200 | 72.6% | **90.5%** | 68.0% |
+| 2 axes, slab & `p3>0.9` | 0.0040 | 22.6% | 23.5% | 23.3% |
+| 2 axes, `p0>0.8 & p1>0.8` | 0.0400 | 92.7% | 95.0% | 93.8% |
+| 4 axes, all in `[0,0.35]` | 0.0150 | 62.0% | 67.0% | 60.5% |
+
+LHS controls the **1-D projections**, not the joint occupancy of the cube: the gain is large when
+one dominant parameter drives the failure and fades as more parameters must conspire. The claim
+"LHS reaches rare regions random search misses" is therefore true in the marginal-effect regime
+and should be stated that way.
+
+### Tests
+
+```bash
+pytest tests/test_random_search_comparison.py -q      # 31 tests, mock scenarios, no Docker
+```

@@ -33,6 +33,17 @@ scenarios/*/models/
 envelope.csv
 envelope*.csv
 
+# Campaign outputs from run_model_comparison.py / run_qoi_optimizer.py.
+# These are simulation results, not source: hours of Unity per file, and they
+# change on every run. Keep the numbers you want to cite in RESULTS.md instead.
+# NOTE: *_raw.npz holds the evaluated points and is the only file you cannot
+# regenerate without re-running the simulator — back it up outside git if a
+# campaign matters (the *.npy rule above already covers plain numpy dumps).
+results/
+*_raw.npz
+*_regions.csv
+*_arms.csv
+
 # API job store (runtime only)
 *.jobstore
 

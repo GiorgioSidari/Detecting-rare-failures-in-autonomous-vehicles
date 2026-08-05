@@ -52,6 +52,11 @@ def main() -> None:
     ap.add_argument("--min-speed", type=float, default=None,
                     help="forza il limite superiore di min_speed (m/s): utile con --max-speed "
                          "basso per evitare bande min/max sovrapposte (campioni min>max)")
+    ap.add_argument("--max-seg", type=float, default=None,
+                    help="forza il limite superiore di segment_length (m): e' la leva che "
+                         "sposta di piu' il tasso di fallimento (vedi RESULTS.md)")
+    ap.add_argument("--min-seg", type=float, default=None,
+                    help="alza il limite inferiore di segment_length (m)")
     ap.add_argument("--sampling", choices=["uniform", "realistic"], default="realistic",
                     help="'realistic' = campiona dalla distribuzione operativa (ppf): la "
                          "frazione di fallimenti stima P(fallimento) sull'ODD; "
@@ -72,7 +77,8 @@ def main() -> None:
     # Explicit overrides (max speed/angle, min speed). They require explicit bounds: for the
     # 'full' preset we start from the scenario defaults.
     if (args.max_speed is not None or args.max_angle is not None
-            or args.min_speed is not None):
+            or args.min_speed is not None or args.max_seg is not None
+            or args.min_seg is not None):
         if lower is None or upper is None:
             from scenarios import SCENARIOS
             _b = SCENARIOS[args.scenario].param_bounds()
@@ -92,6 +98,12 @@ def main() -> None:
             Y = float(args.min_speed)
             upper[5] = Y                                 # min_speed upper
             lower[5] = max(0.5, min(lower[5], Y - 1.0))
+        if args.max_seg is not None:
+            upper[7] = float(args.max_seg)               # segment_length upper
+            lower[7] = min(lower[7], upper[7] - 1.0)
+        if args.min_seg is not None:
+            lower[7] = float(args.min_seg)
+            upper[7] = max(upper[7], lower[7] + 1.0)
 
     # Keep lower < upper on every dimension (scipy.scale rejects otherwise).
     if lower is not None and upper is not None:
