@@ -99,9 +99,9 @@ class UdacitySimulator():
             self.loopStartTime = time.time()
             iterations = 0
 
-            # Split dei tempi per step: inferenza (agent.predict) vs attesa del
-            # frame Unity (env.step). Serve a capire DOVE va il tempo del loop di
-            # controllo (~0.67 s/step): CPU/inferenza o I/O verso il simulatore.
+            # Per-step time split: inference (agent.predict) vs waiting for the Unity frame
+            # (env.step). Tells WHERE the control-loop time goes: CPU/inference or I/O to the
+            # simulator.
             predictSeconds = 0.0
             stepSeconds = 0.0
 
@@ -152,8 +152,8 @@ class UdacitySimulator():
             #Add the timing stats to the output
             simulationOutput.elapsedTime = elapsedTime
             simulationOutput.iterations = iterations
-            simulationOutput.predictSeconds = predictSeconds   # tempo tot. inferenza
-            simulationOutput.stepSeconds = stepSeconds         # tempo tot. attesa Unity
+            simulationOutput.predictSeconds = predictSeconds   # total inference time
+            simulationOutput.stepSeconds = stepSeconds         # total Unity-wait time
 
         except Exception as e:
             raise e

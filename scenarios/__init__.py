@@ -14,21 +14,6 @@ use_nn flag
 -----------
 The API server sets `use_nn=True` for emergency_braking once the model file
 exists, so callers get the NN-driven simulator automatically.
-
-Multi-model lane-keeping (Step D)
-----------------------------------
-Two LaneKeepingScenario instances target separate Docker containers on different
-ports, each running a different autopilot model.  Start them with:
-
-    docker compose up --build                  # port 8000 — chauffeur model
-    docker compose -f docker-compose-ch2.yml up --build  # port 8001 — ch2 model
-
-Then compare failure profiles:
-
-    from pipeline.orchestrator import run
-    r1 = run("lane_keeping_chauffeur", n_samples=200)
-    r2 = run("lane_keeping_ch2",       n_samples=200)
-    print(r1.failure_rate, r2.failure_rate)
 """
 
 import os
@@ -56,18 +41,8 @@ SCENARIOS: dict = {
     "emergency_braking": EmergencyBrakingScenario(use_nn=_nn_trained),
     "cut_in":            CutInScenario(),
 
-    # Single-model lane-keeping (default port 8000)
+    # Lane-keeping (default port 8000)
     "lane_keeping": LaneKeepingScenario(),
-
-    # Multi-model comparison (Step D) — requires two Docker containers
-    "lane_keeping_chauffeur": LaneKeepingScenario(
-        simulator_url="http://localhost:8000",
-        name_suffix="_chauffeur",
-    ),
-    "lane_keeping_ch2": LaneKeepingScenario(
-        simulator_url="http://localhost:8001",
-        name_suffix="_ch2",
-    ),
 }
 
 # Fase 2 (piano video-CNN): emergency_braking driven by a camera CNN inside

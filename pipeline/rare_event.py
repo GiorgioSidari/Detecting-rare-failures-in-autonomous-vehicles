@@ -1,36 +1,30 @@
 from __future__ import annotations
 
 """
-Stima efficiente di eventi rari (livello massimo, M4) — metodo Cross-Entropy.
+Efficient rare-event probability estimation via the Cross-Entropy method.
 
-Problema: stimare P(fallimento) = P(margine QoI < soglia) sotto la distribuzione
-operativa realistica f, quando questa probabilita' e' BASSA. Il Monte Carlo ingenuo
-e' inefficiente: per vedere anche solo pochi fallimenti servono moltissimi run (a
-~10 s/run sul simulatore vero, ore). Vedi scripts/validate_rare_event.py per la
-dimostrazione (a P~1e-4 l'MC ingenuo e' inutile a parita' di budget).
+Goal: estimate P(failure) = P(QoI margin < threshold) under the realistic operational
+distribution f when that probability is small. Plain Monte Carlo is inefficient: at a low
+P it needs a huge number of runs to observe even a few failures.
 
-Idea (Cross-Entropy + Importance Sampling):
-  1. Si parte con una proposta q = f.
-  2. A ogni iterazione si campiona da q, si valutano i margini, si selezionano gli
-     "elite" (i piu' vicini/dentro al fallimento — soglia gamma abbassata verso 0),
-     e si RI-ADATTANO i parametri di q verso la regione di fallimento (aggiornamento
-     cross-entropy = momenti pesati degli elite, pesi = f/q).
-  3. Quando gamma raggiunge la soglia di fallimento, si stima P con importance
-     sampling usando la proposta finale, in modo che i campioni cadano dove i
-     fallimenti sono. Cosi' pochi run bastano.
+Cross-Entropy + Importance Sampling:
+  1. Start with a proposal q = f.
+  2. Each iteration: sample from q, evaluate margins, keep the "elite" (closest to / inside
+     failure, threshold gamma lowered toward 0), and refit q toward the failure region
+     (CE update = weighted moments of the elite, weights = f/q).
+  3. When gamma reaches the failure threshold, estimate P with importance sampling using the
+     final proposal, so samples land where failures are and few runs suffice.
 
-Robustezza: la stima finale usa una DEFENSIVE MIXTURE  d = alpha*f + (1-alpha)*q,
-cosi' i pesi f/d sono limitati (<= 1/alpha) e la copertura del supporto e' garantita
-(evita la sottostima tipica di una proposta troppo stretta). Il CI e' bootstrap
-(l'estimatore IS a P piccola e' asimmetrico: il CI normale sarebbe ottimista).
+Robustness: the final estimate uses a defensive mixture  d = alpha*f + (1-alpha)*q, so the
+weights f/d are bounded (<= 1/alpha) and support coverage is guaranteed (this avoids the
+underestimation of a proposal that becomes too narrow). The CI is bootstrap-based (the IS
+estimator is skewed at small P, where a normal CI would be optimistic).
 
-LIMITE NOTO: la proposta e' un prodotto di distribuzioni UNIMODALI indipendenti. Se
-la regione di fallimento e' MULTIMODALE (es. "almeno uno di N parametri estremo"),
-questa CE la copre male e sottostima. In quei casi si usa una proposta a MISCELA o
-la Subset Simulation (vedi roadmap). Per regioni a modo singolo funziona bene.
+Known limitation: the proposal is a product of independent unimodal distributions. On a
+multimodal failure region (e.g. "at least one of N parameters extreme") this CE underestimates;
+use a mixture proposal or Subset Simulation instead. It works well on single-mode regions.
 
-Nota: NON valida il simulatore; qui si assume che il margine (via QoI) sia gia'
-affidabile — la fedelta' di cadenza e' un prerequisito risolto altrove.
+This does not validate the simulator: it assumes the margin (via the QoI) is already reliable.
 """
 
 from dataclasses import dataclass, field
@@ -40,21 +34,21 @@ from scipy import stats
 
 @dataclass
 class RareEventResult:
-    p_fail: float                       # stima di P(fallimento) sotto f
-    ci: tuple                           # (lo, hi) intervallo bootstrap 95%
-    n_evaluations: int                  # run totali usati (budget)
-    iterations: int                     # iterazioni CE eseguite
-    q_loc: np.ndarray                   # loc della proposta finale (per dimensione)
-    q_scale: np.ndarray                 # scale della proposta finale
-    gamma_history: list = field(default_factory=list)   # soglie gamma per iterazione
-    n_fail_effective: int = 0           # n. campioni finali in fallimento (diagnostico)
+    p_fail: float                       # estimate of P(failure) under f
+    ci: tuple                           # (lo, hi) bootstrap 95% interval
+    n_evaluations: int                  # total simulation runs used (budget)
+    iterations: int                     # CE iterations performed
+    q_loc: np.ndarray                   # final proposal location (per dimension)
+    q_scale: np.ndarray                 # final proposal scale
+    gamma_history: list = field(default_factory=list)   # per-iteration gamma thresholds
+    n_fail_effective: int = 0           # failing samples in the final estimate (diagnostic)
 
 
 def scenario_margin_fn(scenario):
     """
-    Costruisce una funzione margine(params)->margini dallo scenario reale, chiamando
-    il simulatore e la QoI (come fa l'orchestrator). params: (M, d) -> margini (M,).
-    I run non validi tornano NaN (gia' gestito da compute_qoi) e vengono filtrati a valle.
+    Build a margin(params) -> margins function from a scenario, running the simulator and the
+    QoI (as the orchestrator does). params: (M, d) -> margins (M,). Invalid runs return NaN
+    (handled by compute_qoi) and are filtered downstream.
     """
     def _margin(params: np.ndarray) -> np.ndarray:
         traj = scenario.run_simulation(params)
@@ -63,7 +57,7 @@ def scenario_margin_fn(scenario):
 
 
 def _build_q(lo, hi, loc, scale):
-    """Proposta = prodotto di truncnorm su [lo, hi] con (loc, scale) per dimensione."""
+    """Proposal = product of truncated normals on [lo, hi] with (loc, scale) per dimension."""
     scale = np.maximum(scale, 1e-9)
     a = (lo - loc) / scale
     b = (hi - loc) / scale
@@ -71,7 +65,7 @@ def _build_q(lo, hi, loc, scale):
 
 
 def _logpdf_product(dists, X):
-    """Somma dei log-pdf per dimensione: log della densita' prodotto in X (M,d)->(M,)."""
+    """Sum of per-dimension log-pdfs = log of the product density at X (M, d) -> (M,)."""
     lp = np.zeros(X.shape[0])
     for j, d in enumerate(dists):
         lp += d.logpdf(X[:, j])
@@ -79,7 +73,7 @@ def _logpdf_product(dists, X):
 
 
 def _sample_product(dists, n, rng, d):
-    """Campiona n punti dal prodotto di distribuzioni (rng condiviso -> dim indipendenti)."""
+    """Draw n points from the product of distributions (shared rng -> independent dims)."""
     X = np.empty((n, d))
     for j in range(d):
         X[:, j] = dists[j].rvs(size=n, random_state=rng)
@@ -87,7 +81,7 @@ def _sample_product(dists, n, rng, d):
 
 
 def _bootstrap_ci(h, rng, n_boot=4000):
-    """CI percentile 95% via bootstrap sulla media di h (contributi IS per campione)."""
+    """95% percentile bootstrap CI for the mean of h (per-sample IS contributions)."""
     n = len(h)
     if n == 0:
         return (float("nan"), float("nan"))
@@ -112,27 +106,27 @@ def estimate_failure_probability(
     verbose: bool = False,
 ) -> RareEventResult:
     """
-    Stima P(margine < threshold) sotto la distribuzione f (lista di distribuzioni
-    scipy congelate, una per dimensione), con la Cross-Entropy + defensive-mixture IS.
+    Estimate P(margin < threshold) under distribution f (a list of frozen scipy
+    distributions, one per dimension), via Cross-Entropy + defensive-mixture IS.
 
-    Parametri
-    ---------
-    margin_fn        : callable((M,d)) -> (M,) margini. NaN = run non valido (filtrato).
-    f_dists          : distribuzione operativa reale (es. scenario.param_distributions()).
-    lower, upper     : bound per la troncatura della proposta.
-    threshold        : soglia di fallimento (default 0.0: margine < 0).
-    samples_per_iter : campioni per iterazione CE.
-    rho              : frazione elite (quantile di margine per abbassare gamma).
-    final_samples    : campioni della stima finale (defensive mixture).
-    alpha            : quota di mixture campionata da f (0<alpha<1): limita i pesi a 1/alpha.
-    scale_floor      : scala minima della proposta (frazione del range) anti-collasso.
+    Parameters
+    ----------
+    margin_fn        : callable((M, d)) -> (M,) margins. NaN = invalid run (filtered out).
+    f_dists          : realistic operational distribution (e.g. scenario.param_distributions()).
+    lower, upper     : bounds used to truncate the proposal.
+    threshold        : failure threshold (default 0.0: margin < 0).
+    samples_per_iter : samples per CE iteration.
+    rho              : elite fraction (margin quantile used to lower gamma).
+    final_samples    : samples of the final estimate (defensive mixture).
+    alpha            : mixture fraction drawn from f (0<alpha<1): bounds the weights to 1/alpha.
+    scale_floor      : minimum proposal scale (fraction of the range) to avoid collapse.
     """
     rng = np.random.default_rng(seed)
     lo = np.asarray(lower, dtype=float)
     hi = np.asarray(upper, dtype=float)
     d = len(lo)
 
-    # Init proposta = momenti di f (q0 ~ f in forma)
+    # Init the proposal from f's moments (q0 matches f in shape).
     loc = np.array([float(fd.mean()) for fd in f_dists])
     scale = np.array([float(fd.std()) for fd in f_dists])
     scale_min = scale_floor * (hi - lo)
@@ -140,7 +134,7 @@ def estimate_failure_probability(
     n_eval = 0
     gamma_hist: list = []
 
-    # ── Fase CE: sposta q verso la regione di fallimento ──
+    # CE phase: move q toward the failure region.
     for _ in range(max_iter):
         q = _build_q(lo, hi, loc, scale)
         X = _sample_product(q, samples_per_iter, rng, d)
@@ -155,7 +149,7 @@ def estimate_failure_probability(
         Xe = Xv[mv <= gamma]
         if Xe.shape[0] < 2:
             break
-        # pesi di importanza degli elite (per l'aggiornamento CE), stabilizzati
+        # Elite importance weights for the CE update (stabilised).
         logw = _logpdf_product(f_dists, Xe) - _logpdf_product(q, Xe)
         w = np.exp(logw - logw.max())
         w = w / w.sum() if w.sum() > 0 else np.ones(len(w)) / len(w)
@@ -164,9 +158,9 @@ def estimate_failure_probability(
         if verbose:
             print(f"  [CE] gamma={gamma:+.4f}  elite={Xe.shape[0]}  eval={n_eval}", flush=True)
         if gamma <= threshold:
-            break   # raggiunta la soglia di fallimento
+            break   # failure threshold reached
 
-    # ── Stima finale: importance sampling con defensive mixture d=alpha*f+(1-alpha)*q ──
+    # Final estimate: importance sampling with defensive mixture d = alpha*f + (1-alpha)*q.
     q = _build_q(lo, hi, loc, scale)
     n_f = int(alpha * final_samples)
     X = np.vstack([_sample_product(f_dists, n_f, rng, d),
@@ -175,7 +169,7 @@ def estimate_failure_probability(
     n_eval += final_samples
     ok = np.isfinite(m)
     Xv, mv = X[ok], m[ok]
-    # peso = f/d = 1 / (alpha + (1-alpha) * q/f), stabile in log-spazio
+    # weight = f/d = 1 / (alpha + (1-alpha) * q/f), computed stably in log space.
     log_qf = _logpdf_product(q, Xv) - _logpdf_product(f_dists, Xv)
     w = 1.0 / (alpha + (1.0 - alpha) * np.exp(log_qf))
     fail = (mv < threshold).astype(float)

@@ -63,7 +63,7 @@ chmod +x opensbt-core/Simulator/SimulatorExec/ubuntu_binaries/ubuntu.x86_64
 
 ### 3. (Optional) drop the amd64 pin
 
-The `platform: linux/amd64` lines in `docker-compose.yml` / `docker-compose-ch2.yml`
+The `platform: linux/amd64` lines in `docker-compose.yml` / `docker-compose.parallel.yml`
 were added for Apple Silicon. On a native x86_64 host they're harmless (the host IS
 amd64), so you can leave them or remove them — either works.
 
@@ -100,22 +100,7 @@ python tests/test_lane_keeping.py
 python -c "from pipeline.orchestrator import run; print(run('lane_keeping', n_samples=50).failure_rate)"
 ```
 
----
-
-## Step D — multi-model comparison
-
-Once the single model works, add the second model and run both containers:
-
-```bash
-# place the second model, e.g. opensbt-core/Simulator/SelfDrivingModels/dave2-ch2.h5
-cd opensbt-core
-docker compose up --build -d                           # chauffeur → :8000
-docker compose -f docker-compose-ch2.yml up --build -d  # second model → :8001
-cd ..
-python compare_models.py --n-samples 200 --save results/
-```
-
-See `Simulator/SelfDrivingModels/README.md` for how to obtain the second model.
+For parallel runs, use `docker-compose.parallel.yml` (see the main README, section "Lane Keeping").
 
 ---
 

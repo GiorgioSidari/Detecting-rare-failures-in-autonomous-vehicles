@@ -1,4 +1,4 @@
-# --- GENERATO da gen_parallel_compose.py -- non modificare a mano ------------
+# --- GENERATO da gen_parallel_compose.py ------------
 # 4 simulatori in parallelo su porte host 8000..8003 (container: sempre 8000).
 # Avvio:  docker compose -f docker-compose.parallel.yml up --build
 # Il client deve usare lo stesso numero di worker: NUM_WORKERS=4

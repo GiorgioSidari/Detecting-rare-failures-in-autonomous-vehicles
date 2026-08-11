@@ -57,11 +57,10 @@ class UnityProcess(object):
         launch_string = None
         port_args = ["--port", str(port), '-logFile', 'unitylog.txt']
 
-        # Rendering leggero: sotto Xvfb Unity renderizza via software GL (llvmpipe,
-        # niente GPU), e il render della scena e' il collo di bottiglia del loop di
-        # controllo (~85% del tempo/step). Abbassare risoluzione e qualita' riduce il
-        # costo di fill-rate e alza la cadenza. Tarabile via env (0 = non passare il
-        # flag e lasciare i default del build).
+        # Light rendering: under Xvfb, Unity renders via software GL (llvmpipe, no GPU), and the
+        # scene render is the control-loop bottleneck (~85% of the time/step). Lowering resolution
+        # and quality cuts the fill-rate cost and raises the rate. Tunable via env
+        # (0 = do not pass the flag and keep the build defaults).
         _w = os.getenv("UNITY_SCREEN_WIDTH", "320")
         _h = os.getenv("UNITY_SCREEN_HEIGHT", "240")
         _q = os.getenv("UNITY_SCREEN_QUALITY", "Fastest")

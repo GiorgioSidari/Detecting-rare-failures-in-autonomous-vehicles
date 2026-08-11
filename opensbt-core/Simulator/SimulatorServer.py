@@ -46,11 +46,10 @@ def simulationThread():
                 np.float64: float
             })
 
-            # I campi di timing (predictSeconds/stepSeconds) potrebbero non essere
-            # DICHIARATI nella versione installata di UdacitySimulatorIO (se il
-            # pacchetto e' pip-installato separatamente): jsonable_encoder li
-            # scarterebbe. Li iniettiamo qui leggendoli dall'istanza, cosi' arrivano
-            # nel JSON a prescindere dal packaging.
+            # The timing fields (predictSeconds/stepSeconds) may not be DECLARED in the installed
+            # version of UdacitySimulatorIO (if the package is pip-installed separately):
+            # jsonable_encoder would drop them. Inject them here by reading them from the instance,
+            # so they reach the JSON regardless of packaging.
             for _k in ("predictSeconds", "stepSeconds"):
                 if _k not in output:
                     _v = getattr(simOutput, _k, None)

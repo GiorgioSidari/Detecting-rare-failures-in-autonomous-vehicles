@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-Validazione (M3) della stima di probabilita' di fallimento del livello intermedio.
+Validation (M3) of the intermediate-level failure-probability estimate.
 
-NON valida il simulatore (quello e' un altro discorso, gia' affrontato con la
-cadenza di controllo): valida la *macchina statistica* introdotta nella pipeline —
-campionamento distribution-aware via ppf + stima P(fallimento) + intervallo di Wilson.
+Does NOT validate the simulator (that is a separate matter, addressed via control fidelity):
+it validates the statistical machinery added to the pipeline -- distribution-aware sampling via
+ppf + P(failure) estimate + Wilson interval.
 
-Idea: si sostituisce il simulatore con una regola di fallimento SINTETICA e nota,
-definita sugli stessi 9 parametri del lane_keeping. Sotto le distribuzioni operative
-reali (`LaneKeepingScenario.param_distributions`) la probabilita' vera P_true di quella
-regola e' calcolabile con un Monte Carlo indipendente ad altissimo N (ground truth).
-Poi si verifica che l'estimatore usato dalla pipeline (LHS + ppf, come in
-`pipeline.orchestrator.run`) a N moderato:
-  1. CONVERGA a P_true (bias ~0),
-  2. abbia un Wilson CI che COPRE P_true circa nel 95% dei casi (copertura calibrata;
-     con LHS la varianza e' <= binomiale, quindi il CamI e' semmai conservativo).
+Idea: replace the simulator with a synthetic, known failure rule defined on the same 9
+parameters. Under the real operational distributions (LaneKeepingScenario.param_distributions)
+the true probability P_true of that rule is computable with an independent high-N Monte Carlo
+(ground truth). We then check that the estimator used by the pipeline (LHS + ppf, as in
+pipeline.orchestrator.run) at moderate N:
+  1. CONVERGES to P_true (bias ~0),
+  2. has a Wilson CI that COVERS P_true about 95% of the time (with LHS the variance is <=
+     binomial, so the interval is at worst conservative).
 
-Uso:
+Usage:
     python scripts/validate_rare_probability.py
     python scripts/validate_rare_probability.py --ns 50,200,1000 --reps 300
 
-Non richiede Docker: e' tutto in-process.
+No Docker required: everything runs in-process.
 """
 from __future__ import annotations
 
@@ -35,18 +34,17 @@ if _PROJECT_ROOT not in sys.path:
 import numpy as np
 from scipy.stats.qmc import LatinHypercube
 
-# Riusa il CODICE REALE della pipeline: le distribuzioni dello scenario e il Wilson CI.
+# Reuse the REAL pipeline code: the scenario distributions and the Wilson CI.
 from scenarios.lane_keeping.config import LaneKeepingScenario
 from pipeline.orchestrator import _wilson_ci
 
 
 def synthetic_fail(params: np.ndarray, angle_thr: float, speed_thr: float) -> np.ndarray:
     """
-    Regola di fallimento SINTETICA e nota sui 9 parametri (stessa forma del vero
-    scenario: peggiora con curve strette E velocita' alta). Serve solo a fornire un
-    ground truth: fallisce se max(5 angoli) > angle_thr E max_speed > speed_thr.
-    Alzando le soglie si rende l'evento piu' RARO (default: regime raro, P ~ pochi %),
-    che e' il caso interessante per validare il Wilson CI e motivare M4.
+    Synthetic, known failure rule on the 9 parameters (same shape as the real scenario: worse
+    with sharp curves AND high speed). It only provides a ground truth: fails if
+    max(5 angles) > angle_thr AND max_speed > speed_thr. Raising the thresholds makes the event
+    rarer (the default targets the rare regime, P ~ a few %), the interesting case for the CI.
     """
     max_angle = params[:, :5].max(axis=1)
     max_speed = params[:, 6]
@@ -54,7 +52,7 @@ def synthetic_fail(params: np.ndarray, angle_thr: float, speed_thr: float) -> np
 
 
 def ppf_sample(dists, unit):
-    """Trasforma i campioni unitari con la ppf, ESATTAMENTE come fa l'orchestrator."""
+    """Transform unit samples with the ppf, exactly as the orchestrator does."""
     out = np.empty_like(unit)
     for j, d in enumerate(dists):
         out[:, j] = d.ppf(unit[:, j])
@@ -62,17 +60,17 @@ def ppf_sample(dists, unit):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Validazione M3 della stima di P(fallimento).")
+    ap = argparse.ArgumentParser(description="M3 validation of the P(failure) estimate.")
     ap.add_argument("--ns", default="50,200,1000",
-                    help="valori di N da testare, separati da virgola (default 50,200,1000)")
+                    help="N values to test, comma-separated (default 50,200,1000)")
     ap.add_argument("--reps", type=int, default=300,
-                    help="ripetizioni (seed) per stimare bias e copertura (default 300)")
+                    help="repetitions (seeds) to estimate bias and coverage (default 300)")
     ap.add_argument("--truth-n", type=int, default=1_000_000,
-                    help="campioni del Monte Carlo di ground truth (default 1e6)")
+                    help="ground-truth Monte Carlo samples (default 1e6)")
     ap.add_argument("--angle-thr", type=float, default=70.0,
-                    help="soglia angolo della regola sintetica (default 70: regime raro)")
+                    help="angle threshold of the synthetic rule (default 70: rare regime)")
     ap.add_argument("--speed-thr", type=float, default=26.0,
-                    help="soglia velocita' della regola sintetica (default 26: regime raro)")
+                    help="speed threshold of the synthetic rule (default 26: rare regime)")
     args = ap.parse_args()
 
     Ns = [int(x) for x in args.ns.split(",") if x.strip()]
@@ -80,15 +78,15 @@ def main() -> None:
     sc = LaneKeepingScenario()
     b = sc.param_bounds()
     lower, upper = b["lower"], b["upper"]
-    dists = sc.param_distributions(lower, upper)   # distribuzioni REALI dello scenario
+    dists = sc.param_distributions(lower, upper)   # the scenario's REAL distributions
     d = len(lower)
 
     line = "=" * 68
     print(line)
-    print(" VALIDAZIONE M3 — stima di P(fallimento) (distribuzioni reali dello scenario)")
+    print(" M3 VALIDATION — P(failure) estimate (scenario's real distributions)")
     print(line)
 
-    # ── Ground truth: MC indipendente ad altissimo N dalle distribuzioni ──
+    # Ground truth: independent high-N MC from the distributions.
     rng = np.random.default_rng(0)
     truth = np.empty((args.truth_n, d))
     for j, dist in enumerate(dists):
@@ -96,10 +94,10 @@ def main() -> None:
     fails_truth = synthetic_fail(truth, args.angle_thr, args.speed_thr)
     p_true = float(fails_truth.mean())
     se_truth = float(np.sqrt(p_true * (1 - p_true) / args.truth_n))
-    print(f" Regola sintetica: max(angoli)>{args.angle_thr:g} AND max_speed>{args.speed_thr:g}")
-    print(f" P_true (MC {args.truth_n:,} campioni) = {p_true*100:.3f}%  (±{se_truth*100:.3f}%)")
+    print(f" Synthetic rule: max(angles)>{args.angle_thr:g} AND max_speed>{args.speed_thr:g}")
+    print(f" P_true (MC {args.truth_n:,} samples) = {p_true*100:.3f}%  (+/-{se_truth*100:.3f}%)")
     print("-" * 68)
-    print(f" {'N':>6} | {'stima media':>12} | {'bias':>8} | {'copertura CI95':>14} | {'ampiezza CI':>11}")
+    print(f" {'N':>6} | {'mean est':>12} | {'bias':>8} | {'CI95 coverage':>14} | {'CI width':>11}")
     print("-" * 68)
 
     all_ok = True
@@ -108,20 +106,20 @@ def main() -> None:
         covered = 0
         widths = np.empty(args.reps)
         for r in range(args.reps):
-            unit = LatinHypercube(d=d, seed=1000 + r).random(n=N)   # come l'orchestrator
+            unit = LatinHypercube(d=d, seed=1000 + r).random(n=N)   # as in the orchestrator
             params = ppf_sample(dists, unit)
             fails = synthetic_fail(params, args.angle_thr, args.speed_thr)
             k = int(fails.sum())
             ests[r] = k / N
-            lo, hi = _wilson_ci(k, N)          # il Wilson CI REALE della pipeline
+            lo, hi = _wilson_ci(k, N)          # the pipeline's REAL Wilson CI
             widths[r] = hi - lo
             if lo <= p_true <= hi:
                 covered += 1
         mean_est = float(ests.mean())
         bias = mean_est - p_true
         coverage = covered / args.reps
-        # Criteri: bias piccolo (scende con N) e copertura >= ~0.93 (Wilson e' esatto/
-        # conservativo; con LHS la varianza e' <= binomiale -> copertura non inferiore).
+        # Criteria: small bias (decreasing with N) and coverage >= ~0.90 (Wilson is exact/
+        # conservative; with LHS the variance is <= binomial, so coverage is not lower).
         ok_bias = abs(bias) < max(0.02, 2 * se_truth + 1.0 / N)
         ok_cov = coverage >= 0.90
         all_ok = all_ok and ok_bias and ok_cov
@@ -130,12 +128,12 @@ def main() -> None:
               f"{coverage*100:>13.1f}% | {widths.mean()*100:>10.2f}%  {flag}")
 
     print("-" * 68)
-    print(" Lettura: stima media ~ P_true (bias ~0, cala con N) e copertura ~95% =")
-    print("          l'estimatore e il CI sono corretti. La convergenza mostra anche")
-    print("          perche' a N piccolo lo 0/20 sperimentale NON e' 'P=0' ma solo un")
-    print("          tetto largo: la stessa macchina, con piu' campioni, stringe il CI.")
+    print(" Reading: mean est ~ P_true (bias ~0, shrinks with N) and ~95% coverage =")
+    print("          the estimator and CI are correct. The convergence also shows why a small")
+    print("          0/20 experiment is NOT 'P=0' but only a wide upper bound: the same machine,")
+    print("          with more samples, tightens the CI.")
     print(line)
-    print(" ESITO:", "TUTTO OK" if all_ok else "ATTENZIONE — qualche criterio non soddisfatto")
+    print(" RESULT:", "ALL OK" if all_ok else "WARNING - some criterion not met")
     print(line)
     sys.exit(0 if all_ok else 1)
 

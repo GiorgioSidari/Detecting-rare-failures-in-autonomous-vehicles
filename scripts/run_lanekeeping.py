@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Runner con output leggibile per lo scenario lane_keeping (pool parallelo).
+Readable runner for the lane_keeping scenario (parallel pool).
 
-Uso:
-    python scripts/run_lanekeeping.py                      # 20 campioni, 4 worker, bounds full
+Usage:
+    python scripts/run_lanekeeping.py                      # 20 samples, 4 workers, full bounds
     python scripts/run_lanekeeping.py --n 50 --workers 4
-    python scripts/run_lanekeeping.py --n 50 --preset realistic   # ODD realistico proposto
+    python scripts/run_lanekeeping.py --n 50 --preset realistic
     python scripts/run_lanekeeping.py --n 30 --seed 7 --quiet
 
-Prerequisiti: i container del simulatore devono essere in esecuzione, es.:
+Prerequisites: the simulator containers must be running, e.g.:
     cd opensbt-core && docker compose -f docker-compose.parallel.yml up --build
 """
 from __future__ import annotations
@@ -18,24 +18,20 @@ import os
 import time
 import sys
 
-# Project root su sys.path (eseguibile da qualsiasi cartella)
+# Project root on sys.path (runnable from any directory).
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# Ordine parametri: angle1..5, min_speed, max_speed, seg_length, map_size.
-#
-# Preset "realistic": PROPOSTA di ODD realistico (da confermare/adeguare).
-# - angoli 0-45 per segmento (evita tornanti irreali)
-# - min_speed 5-8, max_speed 9-14 m/s: bande NON sovrapposte, cosi' non si
-#   generano mai campioni incoerenti con min_speed > max_speed
-# - segmenti piu' lunghi (curve piu' dolci)
+# Parameter order: angle1..5, min_speed, max_speed, seg_length, map_size.
+# "realistic" preset: a plausible ODD -- angles 0-45 per segment, min_speed 5-8 and max_speed
+# 9-14 m/s (non-overlapping bands, so no incoherent min>max samples), longer/gentler segments.
 REALISTIC_LOWER = [0,  0,  0,  0,  0,   5.0,  9.0, 20.0, 200.0]
 REALISTIC_UPPER = [45, 45, 45, 45, 45,  8.0, 14.0, 40.0, 350.0]
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Esegue la pipeline lane_keeping con output chiaro.")
+    ap = argparse.ArgumentParser(description="Run the lane_keeping pipeline with a clear report.")
     ap.add_argument("--n", type=int, default=20, help="numero di campioni LHS (default 20)")
     ap.add_argument("--workers", type=int, default=None,
                     help="numero di container/worker paralleli (default: NUM_WORKERS env o 4)")
@@ -53,14 +49,16 @@ def main() -> None:
                     help="forza il limite superiore di max_speed (m/s) su qualsiasi preset")
     ap.add_argument("--max-angle", type=float, default=None,
                     help="forza il limite superiore degli angoli (gradi) su qualsiasi preset")
+    ap.add_argument("--min-speed", type=float, default=None,
+                    help="forza il limite superiore di min_speed (m/s): utile con --max-speed "
+                         "basso per evitare bande min/max sovrapposte (campioni min>max)")
     ap.add_argument("--sampling", choices=["uniform", "realistic"], default="realistic",
                     help="'realistic' = campiona dalla distribuzione operativa (ppf): la "
                          "frazione di fallimenti stima P(fallimento) sull'ODD; "
                          "'uniform' = LHS uniforme sui bound (baseline)")
     args = ap.parse_args()
 
-    # IMPORTANTE: NUM_WORKERS va impostato PRIMA di importare la pipeline,
-    # perche' il pool viene costruito all'import di scenarios/.
+    # NUM_WORKERS must be set BEFORE importing the pipeline: the pool is built at scenarios/ import.
     if args.workers is not None:
         os.environ["NUM_WORKERS"] = str(args.workers)
     n_workers = int(os.environ.get("NUM_WORKERS", "4"))
@@ -71,26 +69,31 @@ def main() -> None:
     lower = REALISTIC_LOWER if args.preset == "realistic" else None
     upper = REALISTIC_UPPER if args.preset == "realistic" else None
 
-    # Override espliciti (velocita'/angolo massimi). Richiedono bounds espliciti:
-    # per il preset "full" partiamo dai default dello scenario.
-    if args.max_speed is not None or args.max_angle is not None:
+    # Explicit overrides (max speed/angle, min speed). They require explicit bounds: for the
+    # 'full' preset we start from the scenario defaults.
+    if (args.max_speed is not None or args.max_angle is not None
+            or args.min_speed is not None):
         if lower is None or upper is None:
             from scenarios import SCENARIOS
             _b = SCENARIOS[args.scenario].param_bounds()
             lower = list(np.asarray(_b["lower"], dtype=float))
             upper = list(np.asarray(_b["upper"], dtype=float))
         if args.max_angle is not None:
-            for _k in range(5):                          # angoli 1..5 (il vero driver)
+            for _k in range(5):                          # angles 1..5 (the real driver)
                 upper[_k] = float(args.max_angle)
                 lower[_k] = min(lower[_k], upper[_k])
         if args.max_speed is not None:
             X = float(args.max_speed)
-            upper[6] = X                                 # max_speed (upper)
+            upper[6] = X                                 # max_speed upper
             lower[6] = max(1.0, min(lower[6], X - 1.0))
-            upper[5] = min(upper[5], X)                  # min_speed non oltre X
+            upper[5] = min(upper[5], X)                  # min_speed not above X
             lower[5] = max(1.0, min(lower[5], upper[5] - 1.0))
+        if args.min_speed is not None:
+            Y = float(args.min_speed)
+            upper[5] = Y                                 # min_speed upper
+            lower[5] = max(0.5, min(lower[5], Y - 1.0))
 
-    # Sicurezza: nessuna dimensione con lower >= upper (scipy.scale lo rifiuta).
+    # Keep lower < upper on every dimension (scipy.scale rejects otherwise).
     if lower is not None and upper is not None:
         lower = list(map(float, lower)); upper = list(map(float, upper))
         for _i in range(len(lower)):
@@ -112,6 +115,8 @@ def main() -> None:
         print(f" Max angle (cap) : {args.max_angle} deg")
     if args.max_speed is not None:
         print(f" Max speed (cap) : {args.max_speed} m/s")
+    if args.min_speed is not None:
+        print(f" Min speed (cap) : {args.min_speed} m/s")
     print(f" Worker pool     : {n_workers}  (NUM_WORKERS={n_workers})")
     print(sub)
     if not args.quiet:
@@ -132,7 +137,7 @@ def main() -> None:
     n_valid   = int(valid.sum())
     n_invalid = int(getattr(r, "n_invalid", N - n_valid))
     n_deg     = int(getattr(r, "n_degenerate", 0))
-    order = np.argsort(np.where(valid, m, np.inf))[:n_valid]   # solo validi, worst->best
+    order = np.argsort(np.where(valid, m, np.inf))[:n_valid]   # valid only, worst -> best
     mv = m[valid]
     n_rare = len(r.rare_failure_idx)
 
@@ -156,7 +161,7 @@ def main() -> None:
         print(line)
         return
     n_fail = int((mv < 0).sum())
-    # ── Asse RARITA' (probabilita') ──
+    # Rarity axis (probability).
     p_fail = float(getattr(r, "failure_probability", r.failure_rate))
     ci = getattr(r, "failure_probability_ci", None)
     odd_lbl = ("ODD realistico" if getattr(r, "sampling", "uniform") == "realistic"
@@ -165,18 +170,16 @@ def main() -> None:
               if ci is not None else "")
     print(f" P(fallimento)       : {p_fail*100:5.1f}%   [{odd_lbl}]"
           f"   ({n_fail}/{n_valid} falliti){ci_txt}")
-    # ── Asse SEVERITA' (worst-case) ──
+    # Severity axis (worst-case).
     print(f" Worst-case (severita'): bottom-{args.rare_fraction*100:.0f}% = {n_rare}/{n_valid} scenari"
           f"   | margine: min {mv.min():+.3f} | mediana {np.median(mv):+.3f} | max {mv.max():+.3f}")
     print(f" Modi POD             : {r.pod_n_modes}")
     print(sub)
 
-    # ── Fedelta' del loop di controllo ────────────────────────────────────────
-    # Quanto velocemente ha girato il loop DNN->Unity per ogni run. Se cala quando
-    # aumenti --workers, la parallelizzazione ti sta togliendo accuratezza: l'auto
-    # percorre piu' metri tra due sterzate e i fallimenti diventano artefatti di CPU,
-    # non del modello. Tienilo alto (pochi metri/step) scegliendo bene i worker; i
-    # run sotto-soglia si escludono con LK_MIN_CONTROL_HZ / LK_MAX_METERS_PER_STEP.
+    # Control-loop fidelity. How fast the DNN->Unity loop ran per run. If it drops as you add
+    # --workers, parallelism is costing accuracy: the car covers more metres between steers and
+    # failures become CPU artifacts, not model faults. Keep it high (few m/step); under-threshold
+    # runs can be excluded via LK_MIN_CONTROL_HZ / LK_MAX_METERS_PER_STEP.
     chz = getattr(r, "control_hz", None)
     mps = getattr(r, "meters_per_step", None)
     if chz is not None and mps is not None:
@@ -188,9 +191,8 @@ def main() -> None:
             print(f"   Metri per sterzata: min {np.nanmin(mps):5.2f} | mediana "
                   f"{np.nanmedian(mps):5.2f} | max {np.nanmax(mps):5.2f}  m/step")
 
-            # ── Split del tempo per step: inferenza vs attesa Unity ──
-            # Dice DOVE va il tempo del loop: se domina 'attesa Unity' il collo di
-            # bottiglia e' il simulatore (I/O), se domina 'inferenza' e' la CPU.
+            # Per-step time split: inference vs waiting for Unity. Tells where the loop time goes:
+            # if 'wait' dominates the bottleneck is the simulator (I/O), if 'inference' it is CPU.
             im = getattr(r, "infer_ms_per_step", None)
             wm = getattr(r, "wait_ms_per_step", None)
             if im is not None and wm is not None:
@@ -220,7 +222,7 @@ def main() -> None:
     print("   (valori < 0 = fallimento; piu' negativo = peggiore)")
     print(sub)
 
-    # survival (n. step) ricavato dalle traiettorie (timestep non nulli), se disponibile.
+    # Per-run survival (non-zero timesteps), if available.
     survival = None
     try:
         traj = np.asarray(r.trajectories)
@@ -250,8 +252,8 @@ def main() -> None:
         print(f"   #{int(i):<3d} margin={m[i]:+.3f}{extra}   {fmt_params(r.params[i])}")
     print(line)
 
-    # Spiegazione data-driven del PERCHE' di ogni fallimento mostrato sopra:
-    # classifica il modo di fallimento dai dati (XTE e sterzo passo-passo).
+    # Data-driven explanation of each failure shown above: classify the failure mode from the
+    # data (step-by-step XTE and steering).
     def _explain(i):
         Li = int(survival[i]) if survival is not None else r.trajectories[i].shape[0]
         Li = max(1, min(Li, r.trajectories[i].shape[0]))
@@ -298,7 +300,7 @@ def main() -> None:
         print("   (XTE monotona in una direzione = deriva costante; oscilla crescendo = controllo instabile; parte gia alta = spawn/geometria)")
         print(sub)
 
-    # Lettura sintetica
+    # Summary reading.
     fr = r.failure_rate
     if fr >= 0.8:
         hint = ("Tasso di fallimento molto alto: i fallimenti NON sono rari. "

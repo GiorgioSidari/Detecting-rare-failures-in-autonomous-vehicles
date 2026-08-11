@@ -4,7 +4,12 @@ A framework for finding statistically rare, safety-critical failures in AV contr
 
 ## What it does
 
-The system runs N simulations of an AV scenario (Emergency Braking, Cut-In, Lane Keeping), compresses the resulting trajectories with Proper Orthogonal Decomposition, computes a safety margin for each run, and surfaces the bottom-k% worst failures as "rare failures" — the cases that not only crash, but crash hardest.
+The system runs N simulations of an AV scenario (Emergency Braking, Cut-In, Lane Keeping), compresses the resulting trajectories with Proper Orthogonal Decomposition, computes a safety margin for each run, and surfaces the worst failures.
+
+It distinguishes two axes explicitly:
+
+- **Severity** — the bottom-k% worst failures by safety margin (the cases that crash hardest), tie-broken by how early they leave the road.
+- **Rarity** — the *probability* of failure under a realistic operational distribution. With distribution-aware sampling (`--sampling realistic`) the failure fraction becomes an estimate of P(failure), reported with a Wilson confidence interval. For genuinely low probabilities the Cross-Entropy rare-event estimator (`scripts/run_rare_event.py`) samples adaptively toward the failure region and reweights, reaching the same estimate with far fewer runs than plain Monte Carlo.
 
 ### Modes, in plain terms
 
@@ -142,9 +147,11 @@ embedder/
   pod.py                        # Proper Orthogonal Decomposition via SVD
 
 pipeline/
-  orchestrator.py               # LHS → sim → QoI → POD → rare failures
-  rare_failures.py              # find_rare_failures(), summarise_rare_params()
-  rare_event.py                 # Cross-Entropy rare-event probability estimation
+  orchestrator.py       # run(): LHS → sim → QoI → POD → rare failures + P(failure)+CI
+                        # run_rare_event(): Cross-Entropy rare-event estimate
+  rare_failures.py      # find_rare_failures() (severity, bottom-k%)
+  rare_event.py         # Cross-Entropy + importance sampling P(failure) estimator
+  active_boundary.py    # active-learning of the fail/safe boundary (GP + ARD importance)
 
 api/
   server.py                     # FastAPI: /scenarios /run /status /explain /health
@@ -158,9 +165,20 @@ frontend/
 
 scripts/
   validate_pipeline.py          # end-to-end smoke test
-  run_lanekeeping.py            # lane_keeping runner with a readable report
-  run_emergency_braking.py      # same report style, emergency_braking (physics/scalar-MLP/CARLA)
-  run_cut_in.py                 # same report style, cut_in (physics/CARLA)
+  sanity_check.py                # physics sanity (speed sweep)
+  validate_qoi.py                # QoI distribution check
+  validate_pod.py                # POD embedder check
+  run_lanekeeping.py             # lane_keeping runner with a readable report
+  run_emergency_braking.py       # same report style, emergency_braking (physics/scalar-MLP/CARLA)
+  run_cut_in.py                  # same report style, cut_in (physics/CARLA)
+  run_rare_event.py              # Cross-Entropy rare-event runner (Docker)
+  sweep_lanekeeping.py           # ODD grid sweep (failure rate over speed x angle)
+  envelope_lanekeeping.py        # P(failure) vs meters-per-steer curve (operational envelope)
+  validate_rare_probability.py   # in-process validation of the P estimate + Wilson CI
+  validate_rare_event.py         # in-process validation of the Cross-Entropy estimator
+  # --- active-learning boundary (feature branch) ---
+  run_active_boundary.py         # active-learning boundary on the Unity DNN (any BaseScenario)
+  validate_active_boundary.py    # active-boundary P vs brute-force MC (correctness + efficiency)
 ```
 
 > **API/frontend note:** `GET /scenarios` + `POST /run/{name}` work generically for *any* registered scenario, including the `_carla` ones, so the browser frontend already shows failure rate / rare failures / trajectory chart for them. It does **not** yet show the richer terminal-only content (P(fallimento) confidence interval, control-fidelity block, the data-driven "why it failed" text, the worst-run trace) — those live only in the `scripts/run_*.py` runners below, `api/schemas.py::StatusResponse` doesn't carry those fields yet.
@@ -345,6 +363,19 @@ A typical run for an informative analysis and its diagnosis:
 python scripts/run_lanekeeping.py --n 30 --preset realistic --max-speed 6 --trace-worst
 ```
 
+**Other tools** (all use the same pool; run in a second terminal):
+
+- `scripts/sweep_lanekeeping.py` — sweeps a grid of ODDs (max speed × max angle) and tabulates the failure rate per cell, to locate an informative band.
+- `scripts/envelope_lanekeeping.py` — pools runs across conditions and plots **P(failure) vs meters-per-steer** (the operational-envelope curve), deriving the threshold and the required control rate.
+- `scripts/run_rare_event.py` — Cross-Entropy rare-event estimator on the real simulator, for a genuinely low P (with the `--max-speed/--max-angle/--min-speed` caps to target a rare ODD).
+- `scripts/validate_rare_probability.py` and `scripts/validate_rare_event.py` — in-process validations (no Docker) of the P estimate/Wilson CI and of the Cross-Entropy estimator against brute force.
+
+### Key result: the operational envelope
+
+Pooling runs across speeds and binning by their *measured* meters-per-steer (`scripts/envelope_lanekeeping.py`) gives a clean step function: failures are governed not by nominal speed but by the **spatial control resolution** — the metres the car covers between two steering decisions, `meters_per_step ≈ speed / control_rate`. The lane keeper is deterministically safe below **~0.6 m/step**, fails above ~0.8, with a narrow stochastic band in between. Speed alone gave a non-monotonic, confounded picture; binning by meters-per-steer removes the confound.
+
+This yields a concrete requirement: `control_rate ≥ target_speed / 0.6`. At Unity's ~9 Hz the model is safe only up to ~5–6 m/s; driving the ODD's higher speeds (up to 14 m/s) would need **~22 Hz** — about 2.5× the current rate, i.e. faster rendering (GPU) or a retrained controller. The rate-limiter and speed gain soften the failure mode but do not move this boundary, which is set by the control resolution.
+
 ### Reading the report
 
 The report shows the **failure rate** (share of scenarios with safety margin < 0) reframed as **P(fallimento)** with a 95% confidence interval (Wilson score, robust for small N or extreme rates), the **rare failure rate** (the worst bottom-k%, 5% by default — a *severity* measure, distinct from the probability above), the distribution of margins sorted from worst to best, and the table of the most critical scenarios with their parameters and the number of steps survived. It also reports **invalid scenarios** that are *excluded* from the analysis rather than counted: degenerate runs (simulations aborted in very few steps), physically-inconsistent parameter combinations (e.g. `min_speed > max_speed`, Lane Keeping only) and, when the fidelity gate is enabled, **under-sampled** runs (see *Control fidelity* below, Lane Keeping only). Rates and rare failures are computed only over the valid scenarios, so the failure rate is not polluted by non-real cases. For each rare/worst failure the runner also prints a **data-driven explanation** derived from its trajectory — this is scenario-specific: unstable oscillation / uncorrected drift / wrong-way steering for Lane Keeping, reaction timing + residual speed at impact for Emergency Braking, minimum gap and when it occurred for Cut-In.
@@ -362,13 +393,40 @@ LK_MIN_CONTROL_HZ=5        # exclude runs slower than 5 Hz
 LK_MAX_METERS_PER_STEP=2   # exclude runs coarser than 2 m per steering decision
 ```
 
-Empirically, on this setup the cadence sits around **~1.5 Hz / ~2.7 m per steering decision and is essentially the same at 1 and 4 workers** — the bottleneck is Unity's frame delivery, not CPU contention — so parallelism here is safe to use (the 4× speedup comes at no measurable accuracy cost). The gate is provided mainly as a guardrail for heavier worker pools or slower machines.
+Empirically, on this setup the cadence was originally around ~1.5 Hz / ~2.7 m per steering decision and essentially the same at 1 and 4 workers — the bottleneck is Unity's frame delivery, not CPU contention, so parallelism here is safe to use (the 4× speedup comes at no measurable accuracy cost). Splitting the per-step time into **inference** (`agent.predict`) vs **waiting for Unity** (`env.step`) showed the loop was dominated (~85%) by Unity's **software rendering** (llvmpipe under Xvfb), not by CPU/inference. Lowering the render resolution therefore raised the control rate from ~1.5 Hz to **~9 Hz** (and cut meters-per-step accordingly). The resolution is tunable via environment variables baked into the image:
+
+```bash
+XVFB_RESOLUTION=320x240x24   # Xvfb virtual display resolution
+UNITY_SCREEN_WIDTH=320        # Unity -screen-width
+UNITY_SCREEN_HEIGHT=240       # Unity -screen-height
+UNITY_SCREEN_QUALITY=Fastest  # Unity -screen-quality
+```
+
+The gate is provided mainly as a guardrail for heavier worker pools or slower machines.
 
 ### Autopilot stability tuning
 
-The autopilot (`opensbt-core/.../self_driving/supervised_agent.py`) has two knobs aimed at the oscillatory instability seen on curves (drift → steering saturates → overshoots to the opposite side). First, inference uses TF's fast path (`model(obs, training=False)`) instead of `model.predict()`, which rebuilds its predict function on every call — a few milliseconds saved per step (though, per the note above, Unity, not inference, is the cadence bottleneck here). Second, a **steering rate-limiter** caps `|Δsteering|` per step to damp the jerks that lead to saturation; it is active by default at `0.20` and tunable via `LK_STEER_MAX_RATE` (`0` disables it, restoring the raw DNN steering). It mainly reshapes the failure *distribution* — it removes the catastrophic opposite-side overshoots and makes the worst case milder — but it does not reliably lower the overall failure rate; tightening it too much (e.g. `0.15`) over-damps, delaying legitimate curve corrections and pushing borderline runs into mild failures. A **speed-dependent steering gain** (reduce authority at higher speed, as a real car does) is wired but **off by default** (`LK_STEER_SPEED_GAIN_K=0`), because `state["speed"]` arrives in km/h while `max_speed` is in m/s, so its coefficient must be calibrated before enabling it (`LK_STEER_SPEED_REF` sets the reference speed).
+The autopilot (`opensbt-core/.../self_driving/supervised_agent.py`) has three changes aimed at the oscillatory instability seen on curves (drift → steering saturates → overshoots to the opposite side) and at a unit bug in the speed regulator:
 
-Because this code runs **inside the Docker image**, changes take effect only after rebuilding (`docker compose ... up --build`), and the `LK_STEER_*` variables must be set in the container's `environment:` rather than in the host shell (the baked-in defaults apply otherwise).
+- **Unit fix (km/h → m/s).** The Udacity telemetry reports speed in km/h (`udacity_sim.py` multiplies by 3.6) while the ODD `min/max_speed` are in m/s; the original code compared the two directly, so the throttle regulator was almost always in "slow down" mode and the effective speed was decoupled from `max_speed`. Converting to m/s (`speed_mps = speed / 3.6`) makes the regulator actually reach `max_speed`, and puts the speed gain below on a correct footing.
+- **Steering rate-limiter** — caps `|Δsteering|` per step to damp the jerks that lead to saturation; active by default at `0.20` and tunable via `LK_STEER_MAX_RATE` (`0` disables it, restoring the raw DNN steering). It mainly reshapes the failure *distribution* — it removes the catastrophic opposite-side overshoots and makes the worst case milder — but it does not reliably lower the overall failure rate; tightening it too much (e.g. `0.15`) over-damps, delaying legitimate curve corrections and pushing borderline runs into mild failures.
+- **Speed-dependent steering gain** — reduces steering authority as speed grows (like a real car), targeting the high-speed failure mode (~27 m/s, found by the rare-event analysis). Now that speed is handled correctly in m/s, it is active by default (`LK_STEER_SPEED_GAIN_K=0.03`, `LK_STEER_SPEED_REF=12` m/s); `gain = 1/(1 + K·(v − ref))` for `v > ref`.
+- Inference uses TF's fast path (`model(obs, training=False)`) instead of `model.predict()`, which rebuilds its predict function on every call — a few milliseconds saved per step (though, per the note above, Unity's rendering, not inference, was the original cadence bottleneck).
+
+Because this code runs **inside the Docker image**, changes take effect only after rebuilding (`docker compose ... up --build`), and the `LK_STEER_*`/`XVFB_RESOLUTION`/`UNITY_SCREEN_*` variables must be set in the container's `environment:` rather than in the host shell (the baked-in defaults apply otherwise).
+
+### Environment variables (lane keeping)
+
+| Variable | Where | Default | Effect |
+|---|---|---|---|
+| `NUM_WORKERS` / `SIMULATOR_URLS` | host | 4 | worker pool size / explicit endpoints |
+| `LK_MIN_CONTROL_HZ` | host | 0 (off) | exclude runs below this control rate |
+| `LK_MAX_METERS_PER_STEP` | host | 0 (off) | exclude runs above this spatial resolution |
+| `LK_STEER_MAX_RATE` | container | 0.20 | steering rate-limiter (0 = off) |
+| `LK_STEER_SPEED_GAIN_K` | container | 0.03 | speed-dependent steering attenuation (0 = off) |
+| `LK_STEER_SPEED_REF` | container | 12 | reference speed (m/s) for the gain |
+| `XVFB_RESOLUTION` | container | 320x240x24 | virtual display resolution |
+| `UNITY_SCREEN_WIDTH/HEIGHT/QUALITY` | container | 320 / 240 / Fastest | Unity render resolution/quality |
 
 ### A note on the results
 
@@ -385,3 +443,29 @@ Emergency Braking and Cut-In's video-CNN models are much younger by comparison (
 | Emergency Braking | ✅ | ✅ | ✅ (Fase 2) | CARLA 0.9.16 | `scripts/run_emergency_braking.py` |
 | Cut-In | ✅ | — | ✅ (Fase 3) | CARLA 0.9.16 | `scripts/run_cut_in.py` |
 | Lane Keeping | — | — | ✅ (pre-trained DNN) | Docker (opensbt-core) | `scripts/run_lanekeeping.py` |
+
+---
+
+## Active-learning of the failure boundary (feature branch)
+
+On top of the existing pipeline this branch adds a method that *learns* where the controller fails and applies it to the real Udacity DNN. It is **additive** — the existing scenarios and pipeline are untouched — and plugs into the same `BaseScenario` interface. See `RESULTS.md` for the empirical findings.
+
+### Method (`pipeline/active_boundary.py`)
+
+Where `run()` gives severity (bottom-k%) and `run_rare_event()` gives rarity (P), this learns **where and why** a scenario fails: a Gaussian-Process model of the safety margin over the parameter space, refined by sampling adaptively near the fail/safe boundary. It returns P(failure) with a credible interval, the ARD **feature importance** (which parameters drive the failure), and the concrete failing scenarios. It is **backend-agnostic**: it runs on the real Unity DNN (`--scenario lane_keeping`) exactly as on any `BaseScenario`.
+
+```bash
+python scripts/run_active_boundary.py --scenario lane_keeping                  # real DNN (needs Docker)
+python scripts/run_active_boundary.py --scenario lane_keeping --max-angle 8 --max-speed 10 --max-seg 14
+```
+
+Both `run_active_boundary.py` and `run_rare_event.py` accept ODD-narrowing flags to target the rare regime: `--max-angle`, `--max-speed`, `--min-speed`, `--max-seg`, `--min-seg`. Narrowing the ODD until failures become rare is how a genuine rare failure is surfaced (see `RESULTS.md`).
+
+### What it produced on the real model
+
+Applied to the real Udacity DNN in Unity, the active-boundary method was **cross-validated against the existing Cross-Entropy estimator** (they agree on P at the same ODD), and used to **quantify the model's safety envelope in speed** and to extract concrete, reproducible **rare-failure scenarios** (P ≈ 2% at 9–10 m/s). Full numbers in `RESULTS.md`.
+
+### Validation
+
+- `python scripts/validate_active_boundary.py` — active-boundary P vs brute-force Monte Carlo (correctness confirmed; the GP surrogate is **not** more sample-efficient than plain MC for estimating P — an honest limitation, so the method's value is the boundary + importance, not the P estimate).
+- Tests: `pytest tests/test_active_boundary.py -q`.
