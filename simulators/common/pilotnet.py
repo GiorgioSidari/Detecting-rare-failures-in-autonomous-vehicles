@@ -107,7 +107,9 @@ def train_pilotnet(
         os.path.join(save_path, filename),
         monitor="val_loss", verbose=0, save_best_only=save_best_only, mode="auto",
     )
-    early_stopping = EarlyStopping(monitor="val_loss", patience=early_stopping_patience)
+    early_stopping = EarlyStopping(
+        monitor="val_loss", patience=early_stopping_patience, restore_best_weights=True
+    )
 
     model.compile(loss=loss, optimizer=Adam(learning_rate=learning_rate), metrics=metrics or [])
 

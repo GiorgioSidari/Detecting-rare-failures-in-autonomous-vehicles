@@ -41,6 +41,16 @@ _NN_MODEL_PATH = os.path.join(
 )
 _nn_trained = os.path.exists(_NN_MODEL_PATH)
 
+_CARLA_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "emergency_braking", "models", "emergency_braking_cnn.h5"
+)
+_carla_model_trained = os.path.exists(_CARLA_MODEL_PATH)
+
+_CUTIN_CARLA_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "cut_in", "models", "cut_in_cnn.h5"
+)
+_cutin_carla_model_trained = os.path.exists(_CUTIN_CARLA_MODEL_PATH)
+
 SCENARIOS: dict = {
     # Use NN simulator if the model has been trained, otherwise fall back to physics
     "emergency_braking": EmergencyBrakingScenario(use_nn=_nn_trained),
@@ -59,6 +69,20 @@ SCENARIOS: dict = {
         name_suffix="_ch2",
     ),
 }
+
+# Fase 2 (piano video-CNN): emergency_braking driven by a camera CNN inside
+# CARLA, alongside (not replacing) the scalar-feature "emergency_braking" key
+# above. Registered only once trained — see
+# scenarios/emergency_braking/{collect_carla_dataset,train_cnn}.py and
+# opensbt-core/Simulator/emergency_braking/SimulatorServer.py.
+if _carla_model_trained:
+    SCENARIOS["emergency_braking_carla"] = EmergencyBrakingScenario(use_nn="carla")
+
+# Fase 3: cut_in driven by a camera CNN inside CARLA, alongside the physics
+# "cut_in" key above — see scenarios/cut_in/{collect_carla_dataset,train_cnn}.py
+# and opensbt-core/Simulator/cut_in/SimulatorServer.py.
+if _cutin_carla_model_trained:
+    SCENARIOS["cut_in_carla"] = CutInScenario(use_nn="carla")
 
 
 def get_scenario(name: str, use_nn: bool | None = None):

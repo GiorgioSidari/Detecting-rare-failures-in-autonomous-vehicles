@@ -90,14 +90,21 @@ def poll_job(
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     timeout: float = 10,
 ) -> dict:
+    """
+    Returns the poll response once the job reaches a terminal state — "done"
+    OR "error". A per-job application error (e.g. a CARLA spawn collision for
+    that one sampled parameter combination) does NOT raise here: it's a
+    well-formed, completed response, just one that failed. Raising would let
+    a single unlucky sample abort results already collected for every other
+    sample in the batch (see run_job_pool). Only a genuinely stuck job
+    (timeout) raises.
+    """
     deadline = time.time() + job_timeout
     while time.time() < deadline:
         poll = requests.get(f"{url}{poll_endpoint}/{job_id}", timeout=timeout).json()
         status = poll.get("status")
-        if status == "done":
+        if status in ("done", "error"):
             return poll
-        if status == "error":
-            raise RuntimeError(f"Errore worker ({url}) job {job_id}: {poll.get('error')}")
         time.sleep(poll_interval)
     raise TimeoutError(f"Job {job_id} su {url} non completato entro {job_timeout}s.")
 
@@ -114,7 +121,18 @@ def run_job_pool(
     """
     Distribute len(payloads) jobs across `workers` via a shared task queue —
     one thread per worker, each processing at most one job at a time (no
-    hidden server-side serialization). Returns results in payload order.
+    hidden server-side serialization). Returns results in payload order,
+    ALWAYS one entry per payload — never raises because of an individual
+    job's outcome.
+
+    A per-job failure (application error reported by the worker, a submit
+    that couldn't reach it, or a timeout) becomes a
+    `{"status": "error", "error": "..."}` entry at that index instead of
+    aborting the batch — a single unlucky sample (e.g. a rare CARLA spawn
+    collision for one sampled parameter combination) must not discard every
+    other sample's already-completed result. Callers that care (most
+    scenarios' `compute_qoi`) turn these into an invalid/NaN margin for that
+    sample, the same way degenerate runs are already excluded.
 
     on_progress(completed, total, payload_idx, worker_url, result) is called
     (under a lock) after each job finishes, letting the caller print
@@ -144,22 +162,18 @@ def run_job_pool(
                     job_timeout=job_timeout,
                     poll_interval=poll_interval,
                 )
-                results[idx] = result
-                with lock:
-                    completed += 1
-                    if on_progress:
-                        on_progress(completed, N, idx, url, result)
-            finally:
-                task_q.task_done()
+            except Exception as e:  # noqa: BLE001 — submit failure or timeout: a per-job outcome
+                result = {"status": "error", "error": str(e)}
+            results[idx] = result
+            with lock:
+                completed += 1
+                if on_progress:
+                    on_progress(completed, N, idx, url, result)
+            task_q.task_done()
 
-    errors = []
     with ThreadPoolExecutor(max_workers=len(workers)) as executor:
         futures = [executor.submit(_worker, url) for url in workers]
         for future in as_completed(futures):
-            exc = future.exception()
-            if exc is not None:
-                errors.append(exc)
-    if errors:
-        raise errors[0]  # fail-fast: propagate the first error/timeout
+            future.result()  # re-raise only a genuine bug inside _worker itself
 
     return results

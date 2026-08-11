@@ -47,22 +47,33 @@ def preprocess(
     return image
 
 
-def random_flip(image: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Randomly flip the image left<->right; y[0] (steering-like) is negated."""
+def random_flip(
+    image: np.ndarray, y: np.ndarray, steering_label: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Randomly flip the image left<->right. When y[0] is a steering-like signal
+    (direction-dependent), mirroring the image must negate it too. Labels like
+    braking_force don't depend on left/right, so pass steering_label=False to
+    flip the image without touching y (negating it would silently corrupt
+    training — a target of -1.0 has no meaning for a sigmoid/BCE output).
+    """
     if np.random.rand() < 0.5:
         image = cv2.flip(src=image, flipCode=1)
-        y[0] = -y[0]
+        if steering_label:
+            y[0] = -y[0]
     return image, y
 
 
 def random_translate(
-    image: np.ndarray, y: np.ndarray, range_x: int = 100, range_y: int = 10
+    image: np.ndarray, y: np.ndarray, range_x: int = 100, range_y: int = 10,
+    steering_label: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Randomly shift the image and adjust y[0] proportionally to the shift."""
+    """Randomly shift the image; adjusts y[0] only for steering-like labels (see random_flip)."""
     if np.random.rand() < 0.5:
         trans_x = range_x * (np.random.rand() - 0.5)
         trans_y = range_y * (np.random.rand() - 0.5)
-        y[0] += trans_x * 0.002
+        if steering_label:
+            y[0] += trans_x * 0.002
         trans_m = np.float32([[1, 0, trans_x], [0, 1, trans_y]])
         height, width = image.shape[:2]
         image = cv2.warpAffine(image, trans_m, (width, height))
@@ -79,10 +90,13 @@ def random_brightness(image: np.ndarray) -> np.ndarray:
     return image
 
 
-def augment(image: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """flip -> translate -> brightness, adjusting the label in place."""
-    image, y = random_flip(image, y)
-    image, y = random_translate(image, y)
+def augment(
+    image: np.ndarray, y: np.ndarray, steering_label: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """flip -> translate -> brightness. steering_label=False for direction-independent
+    labels (e.g. braking_force) so flip/translate don't corrupt y — see random_flip."""
+    image, y = random_flip(image, y, steering_label=steering_label)
+    image, y = random_translate(image, y, steering_label=steering_label)
     image = random_brightness(image)
     return image, y
 
@@ -132,6 +146,7 @@ class CameraDataGenerator(keras.utils.Sequence):
         batch_size: int = 128,
         is_training: bool = True,
         augment_prob: float = 0.5,
+        steering_label: bool = True,
     ):
         self.X = X
         self.y = y
@@ -140,6 +155,7 @@ class CameraDataGenerator(keras.utils.Sequence):
         self.batch_size = batch_size
         self.is_training = is_training
         self.augment_prob = augment_prob
+        self.steering_label = steering_label
         self.indexes = np.arange(len(X))
         self.on_epoch_end()
 
@@ -162,7 +178,7 @@ class CameraDataGenerator(keras.utils.Sequence):
             y_item = np.atleast_1d(self.y[idx]).astype(np.float64).copy()
 
             if self.is_training and np.random.rand() < self.augment_prob:
-                x_item, y_item = augment(x_item, y_item)
+                x_item, y_item = augment(x_item, y_item, steering_label=self.steering_label)
 
             X_batch[i] = self.preprocess_fn(x_item)
             y_batch[i] = y_item

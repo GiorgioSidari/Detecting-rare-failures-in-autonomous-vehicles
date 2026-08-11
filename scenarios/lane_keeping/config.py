@@ -297,6 +297,10 @@ class LaneKeepingScenario(BaseScenario):
         def _on_progress(completed: int, total: int, idx: int, url: str, result: dict) -> None:
             if not verbose:
                 return
+            if result.get("status") != "done":
+                print(f"  [{completed:2d}/{total}] (sample #{idx+1:2d} @ porta {url.split(':')[-1]})"
+                      f"  FALLITO: {result.get('error')}  — escluso come non valido", flush=True)
+                return
             out     = result["output"]
             L       = len(out["xtes"])
             max_xte = max((abs(x) for x in out["xtes"]), default=0.0)
@@ -327,6 +331,17 @@ class LaneKeepingScenario(BaseScenario):
         infer_ms:        list[float] = []   # ms/step in inferenza (agent.predict)
         wait_ms:         list[float] = []   # ms/step in attesa frame Unity (env.step)
         for result in results:
+            if result.get("status") != "done":
+                # Job fallito (es. errore applicativo del worker, o timeout) — trattato
+                # come un run a 0 step: MIN_VALID_STEPS lo esclude automaticamente piu'
+                # sotto come degenere, esattamente come una simulazione abortita.
+                all_stats.append({"positions": [], "xtes": [], "steerings": []})
+                control_hz.append(float("nan"))
+                meters_per_step.append(float("nan"))
+                infer_ms.append(float("nan"))
+                wait_ms.append(float("nan"))
+                continue
+
             out = result["output"]
             all_stats.append({
                 "positions": out["positions"],   # [[x,y,z], ...]
