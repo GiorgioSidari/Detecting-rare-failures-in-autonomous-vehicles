@@ -4,6 +4,13 @@
 # Ambienti virtuali
 .venv/
 venv/
+# Qualsiasi venv, non solo quello di default: MetaDrive richiede Python <3.12,
+# quindi convivono più ambienti (es. .venv310 per MetaDrive + pipeline).
+# Senza questa riga `git add -A` mette in stage migliaia di file di
+# site-packages, incluse le mappe MetaDrive da centinaia di MB.
+.venv*/
+env/
+ENV/
 
 # File di cache di Python
 __pycache__/
@@ -50,3 +57,8 @@ results/
 # OS
 .DS_Store
 Thumbs.db
+
+# Codice e risultati messi da parte durante il cleanup finale: non fanno
+# parte della sperimentazione riportata in docs/risultati_sperimentazione.md.
+# Restano sul disco per consultazione, fuori dal repo presentabile.
+_archive/

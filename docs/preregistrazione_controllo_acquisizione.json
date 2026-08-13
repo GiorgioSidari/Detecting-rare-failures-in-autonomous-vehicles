@@ -1,0 +1,49 @@
+{
+  "titolo": "L'apprendimento attivo, o il dominio di campionamento? Decomposizione del vantaggio di active boundary",
+  "scritto_il": "2026-08-28",
+  "scritto_prima_dei_dati": true,
+  "campagna": "results/cmp_md12_ctrl  (MetaDrive, 3 bracci, 12 seed, budget 120)",
+  "alpha": 0.05,
+  "metric": "rare_per_100",
+  "odd": "default di scenario, identico a cmp_md12 (angoli [0,85], min_speed [5,15], max_speed [10,30], segment [10,40], map [150,350])",
+  "punto_operativo": "speed_scale = 0.3625, identico a cmp_md12",
+  "test": "Wilcoxon signed-rank appaiato per seed, unilaterale dove la direzione e dichiarata",
+  "procedura": "sequenza fissa: ogni ipotesi al pieno alpha, si ferma alla prima che fallisce",
+  "regola_di_arresto": "12 seed, gli stessi di cmp_md12, decisi in anticipo. Nessuna analisi intermedia, nessun seed aggiunto dopo aver visto i dati.",
+
+  "problema": "In cmp_md12 active_boundary produce 41.59 rari/100 contro 1.43 di plain_sampling, un fattore 29. Ma i due bracci non estraggono dalla stessa distribuzione: active_boundary campiona UNIFORMEMENTE sul box (from_unit, scala lineare) sia per il design iniziale sia per il pool di candidati, mentre plain_sampling estrae dalle marginali ODD (from_dists). Sotto il taglio di rarita (log f <= -36.954) cade il 54.4% dei punti uniformi contro il 9.8% di quelli ODD: active_boundary parte quindi da un disegno gia sbilanciato verso la coda, prima di apprendere qualsiasi cosa. Il vantaggio misurato confonde DOVE si campiona con COSA si impara.",
+
+  "controllo": "active_boundary[lhs+randacq] e identico a active_boundary[lhs] in tutto -- stesso design iniziale da 40 punti, stesso pool da 4000 candidati, stesso budget 120, stesso GP semato -- tranne per l'acquisizione: ogni batch da 16 e pescato a caso dal pool invece che per entropia massima. E la stessa regione di campionamento senza apprendimento.",
+
+  "hypotheses": [
+    {
+      "id": "H1",
+      "a": "active_boundary[lhs]",
+      "b": "active_boundary[lhs+randacq]",
+      "direction": "a>b",
+      "rationale": "l'acquisizione per entropia aggiunge qualcosa oltre alla regione di campionamento. Se non rigetta, l'intero vantaggio di active boundary e attribuibile al fatto che campiona uniformemente sul box, e il metodo non sta guadagnando la propria complessita."
+    },
+    {
+      "id": "H2",
+      "a": "active_boundary[lhs+randacq]",
+      "b": "plain_sampling[lhs]",
+      "direction": "a>b",
+      "rationale": "il campionamento uniforme sul box, da solo e senza alcun apprendimento, produce piu fallimenti rari dell'estrazione dalle marginali ODD. Atteso vincente: e la conseguenza diretta del 54.4% contro 9.8% sotto il taglio di rarita. Quantifica la parte di vantaggio che NON e apprendimento."
+    }
+  ],
+
+  "quantita_descrittiva_dichiarata_in_anticipo": {
+    "nome": "quota_apprendimento",
+    "definizione": "(rare_per_100[ab_lhs] - rare_per_100[ab_lhs+randacq]) / (rare_per_100[ab_lhs] - rare_per_100[plain_lhs])",
+    "nota": "NON e oggetto di test: e una decomposizione descrittiva del divario, riportata con la sua dispersione fra seed. Vale 1 se tutto il vantaggio e apprendimento, 0 se e tutto regione di campionamento."
+  },
+
+  "esiti_dichiarati_in_anticipo": {
+    "H1 e H2 rigettano": "esito atteso. Il vantaggio di active boundary si decompone in due contributi entrambi reali: la regione di campionamento e l'apprendimento. La tesi riporta la quota di ciascuno invece del solo fattore aggregato, e il claim principale diventa piu forte perche isolato.",
+    "H1 rigetta e H2 no": "il campionamento uniforme sul box non spiega nulla del divario: l'intero vantaggio e apprendimento attivo. Risultato piu forte di quello attuale.",
+    "H1 non rigetta": "risultato negativo grave e da riportare per primo: l'acquisizione per entropia non aggiunge nulla di misurabile, e cio che cmp_md12 attribuisce ad active boundary e in realta l'effetto di campionare uniformemente sul box invece che dall'ODD. In quel caso il fattore 29 va ridichiarato nel report come effetto del dominio di campionamento.",
+    "entrambe non rigettano": "la campagna non discrimina; verificare prima di tutto che plain_sampling[lhs] riproduca il pavimento di cmp_md12 (1.43 rari/100), altrimenti il confronto fra sessioni non regge."
+  },
+
+  "ancora_di_sessione": "plain_sampling[lhs] gira nella stessa campagna proprio per questo: il suo valore va confrontato con gli 1.43 rari/100 di cmp_md12 come verifica che la sessione riproduca il pavimento noto. Se diverge in modo sostanziale, i confronti fra questa campagna e cmp_md12 non sono validi e va indagata la deriva prima di interpretare H1 e H2."
+}

@@ -1,0 +1,60 @@
+{
+  "titolo": "REPLICA della classifica su ODD ristretto, con controller degradato",
+  "scritto_il": "2026-08-27",
+  "scritto_prima_dei_dati": true,
+  "rapporto_col_piano_originale": "Stesse cinque ipotesi, stesso ordine, stesso endpoint di docs/preregistrazione_classifica.json, che e gia stato speso con successo su results/cmp_md12 (ODD largo, controller ideale, 26 agosto: H1-H4 rigettate, H5 ferma). Questa e una REPLICA su un sistema diverso, non una seconda analisi dello stesso esperimento.",
+  "campagna": "results/cmp_md12_narrow_lag  (MetaDrive, 6 bracci, 12 seed, budget 120)",
+  "sistema_sotto_test": "PurePursuit DEGRADATO: obs_lag_tau = 0.2456 s, speed_scale = 1.0. NON e lo stesso sistema di cmp_md12 (controller ideale, speed_scale 0.3625). I risultati delle due campagne non vanno mediati ne messi nella stessa tabella.",
+  "odd": "ristretto: angoli [0, 8], min_speed [5, 9.6], max_speed [8.6, 9.6], segment [10, 12], map [150, 350]",
+  "taratura": "results/taratura_md_narrow_lag_odd.json — bisezione su obs_lag con design ODD (--sampling odd), 120 campioni per valutazione, tasso raggiunto 9.5% (11/116, IC Wilson 95% [5.4%, 16.2%])",
+  "alpha": 0.05,
+  "metric": "rare_per_100",
+  "definizione_rarita": "fallimento il cui punto ha log-densita ODD sotto il decile inferiore (rarity_q = 0.10), calibrato su 200000 estrazioni da f. La soglia e ricalcolata su QUESTO ODD: non e la stessa di cmp_md12 e i conteggi non sono confrontabili fra le due campagne.",
+  "test": "Wilcoxon signed-rank appaiato per seed, unilaterale dove la direzione e dichiarata",
+  "procedura": "sequenza fissa: ogni ipotesi al pieno alpha, si ferma alla prima che fallisce",
+  "regola_di_arresto": "12 seed, decisi in anticipo. Nessuna analisi intermedia, nessun seed aggiunto dopo aver visto i dati, nessuna terza taratura se il tasso esce dalla banda.",
+  "rischio_dichiarato_in_anticipo": "La boundary in obs_lag e ripidissima: fra 0.2350 e 0.2562 secondi il tasso passa dall'1.7% al 15.5%, circa 650 punti percentuali per secondo. Il tasso per seed variera parecchio, e il 9.5% scelto sta al bordo alto della banda 2-10%. Se la campagna esce con una varianza enorme fra i seed, QUELLA e il risultato — su questo ODD il sistema degradato non ha un regime raro stabile — e va riportata invece di rincorrere una terza taratura.",
+  "hypotheses": [
+    {
+      "id": "H1",
+      "a": "active_boundary[lhs]",
+      "b": "plain_sampling[lhs]",
+      "direction": "a>b",
+      "rationale": "identica al piano originale. Rigettata sull'ODD largo con p = 0.00024."
+    },
+    {
+      "id": "H2",
+      "a": "active_boundary[lhs]",
+      "b": "cross_entropy[lhs]",
+      "direction": "a>b",
+      "rationale": "identica al piano originale. Rigettata sull'ODD largo con p = 0.00049."
+    },
+    {
+      "id": "H3",
+      "a": "active_boundary[random]",
+      "b": "cross_entropy[random]",
+      "direction": "a>b",
+      "rationale": "identica al piano originale. Rigettata sull'ODD largo con p = 0.00024."
+    },
+    {
+      "id": "H4",
+      "a": "cross_entropy[lhs]",
+      "b": "plain_sampling[lhs]",
+      "direction": "two-sided",
+      "rationale": "bilaterale come nel piano originale. Sull'ODD largo ha rigettato a favore della CE con p = 0.034, il risultato piu fragile del gruppo: questa e la sua replica indipendente."
+    },
+    {
+      "id": "H5",
+      "a": "active_boundary[lhs]",
+      "b": "active_boundary[random]",
+      "direction": "two-sided",
+      "rationale": "ultima come nel piano originale. Sull'ODD largo si e fermata a p = 0.791, pareggio atteso."
+    }
+  ],
+  "esiti_dichiarati_in_anticipo": {
+    "H1-H3 rigettano di nuovo": "la classifica degli algoritmi replica su un secondo ODD, un secondo punto operativo e un sistema sotto test degradato. E l'affermazione piu forte ottenibile da questo lavoro.",
+    "H4 rigetta di nuovo a favore della CE": "conferma indipendente del risultato piu fragile della prima campagna.",
+    "H4 non rigetta, o rigetta al contrario": "la vittoria della CE sul campionamento cieco non replica; il risultato della prima campagna va declassato a osservazione dipendente dal contesto.",
+    "la sequenza si ferma a H1": "su questo ODD e con questo controllore la ricerca attiva non batte il campionamento cieco. Sarebbe il risultato piu interessante di tutti e va riportato per intero, non nascosto."
+  }
+}

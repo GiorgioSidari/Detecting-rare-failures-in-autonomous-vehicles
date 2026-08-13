@@ -46,10 +46,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from pipeline.rare_event import (
+    MIN_DEFENSIVE_SAMPLES,
     RareEventResult,
     _bootstrap_ci,
     _build_q,
     _logpdf_product,
+    check_defensive_budget,
+    defensive_sample_count,
+    effective_sample_size,
     scenario_margin_fn,
 )
 from pipeline.samplers import get_sampler
@@ -149,6 +153,11 @@ class CrossEntropyRunner:
         self.scale_floor = float(scale_floor)
         self.verbose = verbose
 
+
+        self.n_defensive = defensive_sample_count(self.final_samples, self.alpha)
+        self.p_fail_usable = check_defensive_budget(
+            self.final_samples, self.alpha, label=self.label, stacklevel=4)
+
     @property
     def label(self) -> str:
         return f"cross_entropy[{self.sampler.name}]"
@@ -160,7 +169,6 @@ class CrossEntropyRunner:
         d = len(lo)
         thr = self.threshold
 
-        # Proposal initialised on f's moments: q0 has the same shape as f.
         loc = np.array([float(fd.mean()) for fd in self.f_dists])
         scale = np.array([float(fd.std()) for fd in self.f_dists])
         scale_min = self.scale_floor * (hi - lo)
@@ -221,6 +229,7 @@ class CrossEntropyRunner:
         h = fail * w
         p_hat = float(h.mean()) if h.size else 0.0
         ci = _bootstrap_ci(h, rng)
+        ess = effective_sample_size(w)
 
         theta_all = np.vstack([x for x in seen_X if len(x)]) if seen_X else np.empty((0, d))
         margins_all = np.concatenate([y for y in seen_m if len(y)]) if seen_m else np.empty(0)
@@ -234,6 +243,11 @@ class CrossEntropyRunner:
             "iterations": len(gamma_hist),
             "p_fail": p_hat,
             "p_fail_ci": ci,
+            "p_fail_usable": bool(self.p_fail_usable),
+            "n_defensive": int(self.n_defensive),
+            "min_defensive_samples": int(MIN_DEFENSIVE_SAMPLES),
+            "ess": float(ess),
+            "n_fail_effective": int(fail.sum()),
             "n_failures_found": int(labels_all.sum()),
             "worst_margin": float(np.min(margins_all)) if margins_all.size else float("nan"),
             "gamma_history": [float(g) for g in gamma_hist],
@@ -250,6 +264,9 @@ class CrossEntropyRunner:
             q_scale=scale,
             gamma_history=gamma_hist,
             n_fail_effective=int(fail.sum()),
+            n_defensive=int(self.n_defensive),
+            ess=float(ess),
+            p_fail_usable=bool(self.p_fail_usable),
             theta_evaluated=theta_all,
             margins=margins_all,
             labels=labels_all,

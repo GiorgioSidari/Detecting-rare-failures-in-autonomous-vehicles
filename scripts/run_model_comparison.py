@@ -38,7 +38,16 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 ARM_CHOICES = ["ab_lhs", "ab_random", "ce_lhs", "ce_random",
-               "plain_lhs", "plain_random", "qoi_bayes", "qoi_cmaes"]
+               "plain_lhs", "plain_random", "qoi_bayes", "qoi_cmaes",
+               # Control arms: the active-boundary machinery with the active step
+               # DISABLED. Same seed design, same candidate pool, same budget --
+               # each batch is drawn from the pool at random instead of by
+               # entropy. They separate two effects the main campaign confounds:
+               # active_boundary searches uniformly over the box while
+               # plain_sampling draws from the ODD, so part of its rare-failure
+               # advantage may come from WHERE it samples rather than from what
+               # it learns. See pipeline/active_boundary_random.py, acquisition=.
+               "ab_lhs_randacq", "ab_random_randacq"]
 
 
 def build_arms(names, scenario, budget, n_iter, ce_max_iter, lower, upper, verbose):
@@ -64,6 +73,11 @@ def build_arms(names, scenario, budget, n_iter, ce_max_iter, lower, upper, verbo
     factory = {
         "ab_lhs":       lambda: LHSActiveBoundary(scenario, **ab_kw),
         "ab_random":    lambda: RandomSearchActiveBoundary(scenario, **ab_kw),
+        # Control arms -- identical to the two above except acquisition="random".
+        "ab_lhs_randacq":    lambda: LHSActiveBoundary(
+            scenario, acquisition="random", **ab_kw),
+        "ab_random_randacq": lambda: RandomSearchActiveBoundary(
+            scenario, acquisition="random", **ab_kw),
         "ce_lhs":       lambda: LHSCrossEntropy(scenario, **ce_kw),
         "ce_random":    lambda: RandomSearchCrossEntropy(scenario, **ce_kw),
         "plain_lhs":    lambda: PlainSamplingBaseline(scenario, "lhs", n_samples=budget,
@@ -148,10 +162,10 @@ def main() -> None:
         status = scenario.probe_workers(verbose=True)
         good = [u for u, m in status.items() if m == "ok"]
         if not good:
-            print("[preflight] nessun container completa una simulazione — mi fermo.")
+            print("[preflight] no container completes a simulation -- stopping.")
             sys.exit(1)
         if len(good) < len(status):
-            print(f"[preflight] proseguo con {len(good)}/{len(status)} worker.")
+            print(f"[preflight] continuing with {len(good)}/{len(status)} workers.")
 
     # Burn the warm-up transient before any arm is measured. Two independent
     # repeatability sessions both showed the first pass over the points failing
@@ -173,7 +187,7 @@ def main() -> None:
             else:
                 _th = _gs("lhs").bounded(args.warmup, _lo, _hi, seed=12345)
             scenario.run_simulation(_th)
-            print(f"[warmup]   fatto in {(time.time() - _t) / 60:.1f} min")
+            print(f"[warmup]   done in {(time.time() - _t) / 60:.1f} min")
         except Exception as exc:
             print(f"[warmup]   saltato ({type(exc).__name__}: {exc})")
 

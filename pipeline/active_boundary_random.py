@@ -127,8 +127,8 @@ class ActiveBoundaryRunner:
             raise ValueError("acquisition must be 'entropy' or 'random'")
 
         self.scenario = scenario
-        self.sampler = get_sampler(sampler)
-        self.odd_sampler = get_sampler(odd_sampler)
+        self.sampler = get_sampler(sampler) #initial design
+        self.odd_sampler = get_sampler(odd_sampler) # candidate pool
         self.n_seed = int(n_seed)
         self.batch = int(batch)
         self.n_iter = int(n_iter)
@@ -150,7 +150,7 @@ class ActiveBoundaryRunner:
     @property
     def budget(self) -> int:
         """Number of real simulations this configuration will spend."""
-        return self.n_seed + self.batch * self.n_iter
+        return self.n_seed + self.batch * self.n_iter #default = 40 + 16 x 5 = 120
 
     # ── main entry point ────────────────────────────────────────────────────
     def run(self, seed: int = 0) -> ActiveBoundaryResult:
@@ -172,7 +172,7 @@ class ActiveBoundaryRunner:
         def from_unit(u):
             return u * span + lower
 
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng(seed)  #only for randacq
 
         # ── 1. Seed design (the only unguided look at the space) ────────────
         seed_unit = self.sampler.unit(self.n_seed, d, seed=seed)

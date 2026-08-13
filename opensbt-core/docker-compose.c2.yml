@@ -1,0 +1,60 @@
+# Override per il braccio C2 — file YAML, non comandi da eseguire.
+#
+# Attiva il controller state-based condiviso al posto del DNN **senza modificare
+# nulla di preesistente**: né `docker-compose.yml`, né il Dockerfile, né
+# `lanekeeping/`. L'unica leva è l'entrypoint, che punta al server del package
+# additivo `Simulator/c2/`.
+#
+# Uso (due comandi separati: PowerShell 5.1 non supporta '&&'):
+#
+#     cd opensbt-core
+#     docker compose -f docker-compose.yml -f docker-compose.c2.yml up --build
+#
+# Per tornare al braccio C1 (il DNN) basta rilanciare senza `-f docker-compose.c2.yml`.
+#
+# Perché serve
+# ------------
+# C2 è il braccio portante del confronto cross-simulatore: lo stesso controller
+# su Udacity, MetaDrive e CARLA. Neutralizza la competenza del controller e il
+# gap percettivo, così la differenza misurata è attribuibile al SIMULATORE.
+# C1 misura una cosa diversa: quanto un modello addestrato su un simulatore si
+# trasferisce a un altro.
+
+services:
+  simulator:
+    # ⚠️ Il `command` sostituisce l'INTERO CMD del Dockerfile, che non si limita
+    # a lanciare uvicorn: avvia prima Xvfb ed esporta DISPLAY=:99.
+    #
+    # Unity è un'applicazione grafica e pretende un display anche in headless:
+    # senza Xvfb il processo parte ma non riesce a creare il contesto GL, non si
+    # connette al server socket.io, e il container resta per sempre su
+    # "sleep...and repeat to connect" senza un errore esplicito.
+    #
+    # Quindi qui il bootstrap va replicato per intero, cambiando solo il modulo
+    # uvicorn. Se un giorno cambia il CMD del Dockerfile, va aggiornato anche qui.
+    #
+    # `$$` e non `$`: in un compose `${VAR}` lo espande Docker sull'HOST, dove
+    # XVFB_RESOLUTION non esiste. `$$` lo passa letterale a /bin/sh, che lo
+    # risolve dentro il container contro la ENV del Dockerfile.
+    command: '/bin/sh -c "rm -f /tmp/.X99-lock; Xvfb :99 -screen 0 $${XVFB_RESOLUTION:-320x240x24} -ac +extension GLX +extension RANDR +render -noreset & sleep 3 && export DISPLAY=:99 && uvicorn Simulator.c2.server:app --host 0.0.0.0 --port 8000"'
+
+    environment:
+      # Taratura del punto operativo (§7.1): si abbassa finché il backend non
+      # sta al 10-20% di fallimenti sotto campionamento uniforme. Un backend
+      # allo 0% o al 100% non porta informazione e la boundary non è
+      # apprendibile. Il valore va DICHIARATO nel report.
+      - LK_SPEED_SCALE=1.0
+
+      # Gate V3 — segno dello sterzo. Il default del codice è già -1.0, che è il
+      # valore misurato come corretto per Unity: con +1 la pipeline riportava
+      # "sterza nel verso sbagliato", con -1 il modo di fallimento è diventato
+      # "oscillazione instabile", cioè anello chiuso col segno giusto.
+      - LK_STEERING_SIGN=-1.0
+
+      # Degradazioni del controller (0 = OFF, controller robusto). Servono a
+      # rendere il fallimento DIPENDENTE dallo scenario: un PurePursuit ideale
+      # non sbaglia mai, e un braccio che non fallisce mai non ha una boundary
+      # da imparare — il confronto fra metodi di ricerca diventerebbe vuoto.
+      - LK_OBS_LATENCY=0
+      - LK_OBS_LAG_TAU=0.0
+      - LK_STEER_NOISE=0.0

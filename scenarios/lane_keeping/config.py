@@ -209,11 +209,11 @@ class LaneKeepingScenario(BaseScenario):
                 if r.ok:
                     healthy.append(url)
                 elif verbose:
-                    print(f"[pool] {url} risponde ma non healthy "
+                    print(f"[pool] {url} answers but is not healthy "
                           f"({r.status_code}) — ignorato", flush=True)
             except requests.RequestException:
                 if verbose:
-                    print(f"[pool] {url} non raggiungibile — ignorato", flush=True)
+                    print(f"[pool] {url} unreachable -- skipped", flush=True)
         return healthy
 
     def probe_workers(self, timeout: float = 60.0, prune: bool = True,
@@ -246,23 +246,23 @@ class LaneKeepingScenario(BaseScenario):
                     if poll.get("status") == "done":
                         return url, "ok"
                     if poll.get("status") == "error":
-                        return url, f"errore simulatore: {poll.get('error')}"
+                        return url, f"simulator error: {poll.get('error')}"
                     time.sleep(POLL_INTERVAL)
-                return url, f"nessuna risposta entro {timeout:.0f}s (Unity bloccato?)"
+                return url, f"no answer within {timeout:.0f}s (Unity stuck?)"
             except Exception as exc:
                 return url, f"{type(exc).__name__}: {exc}"
 
         self.reset_quarantine()      # a fresh probe overrules earlier verdicts
         candidates = self._healthy_workers(verbose=verbose)
         if verbose:
-            print(f"[preflight] provo una simulazione su {len(candidates)} worker...",
+            print(f"[preflight] trying one simulation on {len(candidates)} workers...",
                   flush=True)
         if candidates:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(candidates)) as ex:
                 for url, msg in ex.map(_probe, candidates):
                     status[url] = msg
         for url in self.simulator_urls:
-            status.setdefault(url, "non raggiungibile (/health fallita)")
+            status.setdefault(url, "unreachable (/health failed)")
 
         good = [u for u, m in status.items() if m == "ok"]
         if verbose:
@@ -379,7 +379,7 @@ class LaneKeepingScenario(BaseScenario):
                 "  cd opensbt-core && "
                 "docker compose -f docker-compose.parallel.yml up --build\n"
                 f"URL tentati: {self.simulator_urls}\n"
-                "(imposta NUM_WORKERS o SIMULATOR_URLS per cambiare il pool)."
+                "(set NUM_WORKERS or SIMULATOR_URLS to change the pool)."
             )
         if verbose:
             ports = ", ".join(u.split(":")[-1] for u in workers)
@@ -420,8 +420,8 @@ class LaneKeepingScenario(BaseScenario):
                     )
                 time.sleep(POLL_INTERVAL)
             raise TimeoutError(
-                f"Job {job_id} su {url} non completato entro {DEFAULT_TIMEOUT}s "
-                f"(sample #{idx + 1}). Il container potrebbe essere bloccato su Unity."
+                f"Job {job_id} on {url} did not finish within {DEFAULT_TIMEOUT}s "
+                f"(sample #{idx + 1}). The container may be stuck on Unity."
             )
 
         def _give_up_or_retry(url: str, idx: int, exc: BaseException) -> None:
@@ -444,13 +444,13 @@ class LaneKeepingScenario(BaseScenario):
                 if len(active_workers) <= 1:
                     return False
                 active_workers.discard(url)
-                scope = "per il resto della sessione" if QUARANTINE_PERSISTS \
-                    else "per questo batch"
+                scope = "for the rest of the session" if QUARANTINE_PERSISTS \
+                    else "for this batch"
                 if QUARANTINE_PERSISTS:
                     self._quarantined.add(url)
-                print(f"  [!] worker {url} escluso dal pool {scope} "
-                      f"({MAX_WORKER_FAILURES} fallimenti consecutivi). "
-                      f"Restano {len(active_workers)} worker.", flush=True)
+                print(f"  [!] worker {url} dropped from the pool {scope} "
+                      f"({MAX_WORKER_FAILURES} consecutive failures). "
+                      f"{len(active_workers)} workers left.", flush=True)
                 return True
 
         def _worker(url: str) -> None:
@@ -520,16 +520,16 @@ class LaneKeepingScenario(BaseScenario):
         if n_ok == 0:
             distinct = sorted(set(job_errors.values()))[:3]
             raise RuntimeError(
-                f"Nessuna delle {N} simulazioni è andata a buon fine su "
-                f"{len(workers)} worker. Errori tipici:\n  "
+                f"None of the {N} simulations succeeded on {len(workers)} "
+                f"workers. Typical errors:\n  "
                 + "\n  ".join(distinct)
-                + "\nControlla i container (docker ps / docker logs): un'istanza Unity "
-                  "bloccata risponde a /health ma non completa mai un job."
+                + "\nCheck the containers (docker ps / docker logs): a stuck Unity "
+                  "instance answers /health but never completes a job."
             )
         if job_errors:
-            print(f"  [!] {len(job_errors)}/{N} simulazioni perse dopo "
-                  f"{MAX_JOB_RETRIES} tentativi: marcate come non valide "
-                  f"ed escluse dai tassi.", flush=True)
+            print(f"  [!] {len(job_errors)}/{N} simulations lost after "
+                  f"{MAX_JOB_RETRIES} retries: marked invalid and excluded "
+                  f"from the rates.", flush=True)
 
         self._n_job_failures = len(job_errors)
         self._last_job_errors = dict(job_errors)

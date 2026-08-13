@@ -1,182 +1,184 @@
 # Detecting Rare Failures in Autonomous Vehicles
 
-A framework for finding statistically rare, safety-critical failures in AV control systems using Latin Hypercube Sampling, neural network behavioral cloning, POD trajectory compression, and a FastAPI + browser-based frontend.
+Search algorithms for **rare, safety-critical failures** of a lane-keeping
+controller, compared head to head on two simulators at a matched budget.
 
-## What it does
-
-The system runs N simulations of an AV scenario (Emergency Braking, Cut-In, Lane Keeping), compresses the resulting trajectories with Proper Orthogonal Decomposition, computes a safety margin for each run, and surfaces the worst failures.
-
-It distinguishes two axes explicitly:
-
-- **Severity** — the bottom-k% worst failures by safety margin (the cases that crash hardest), tie-broken by how early they leave the road.
-- **Rarity** — the *probability* of failure under a realistic operational distribution. With distribution-aware sampling (`--sampling realistic`) the failure fraction becomes an estimate of P(failure), reported with a Wilson confidence interval. For genuinely low probabilities the Cross-Entropy rare-event estimator (`scripts/run_rare_event.py`) samples adaptively toward the failure region and reweights, reaching the same estimate with far fewer runs than plain Monte Carlo.
-
-Each scenario has two modes:
-- **Physics mode** — ideal controller, deterministic physics with realistic noise
-- **NN mode** — a neural network trained via behavioral cloning drives the vehicle; its generalisation errors are the source of rare failures
+**The full experimental report is [`docs/risultati_sperimentazione.md`](docs/risultati_sperimentazione.md)**
+(Italian). It is the document to read: everything below is how to run the code
+that produced it.
 
 ---
 
-## Quick start
+## The research question
 
-### Prerequisites
+Given a lane-keeping scenario parameterised by 9 variables and a fixed budget of
+120 simulations, which search strategy surfaces the most *rare* failures?
 
-- Python ≥ 3.9
-- A virtual environment (`.venv/` or similar)
-- Docker only if you want the **Lane Keeping** scenario (opensbt-core)
+Two factors, crossed:
 
-### 1 — Install dependencies
-
-```bash
-pip install -e .
-```
-
-### 2 — Train the Emergency Braking MLP (one-time, ~15 min on CPU)
-
-```bash
-# Step 2a: generate behavioral cloning dataset (~30 seconds)
-python -m scenarios.emergency_braking.train --dataset-only
-
-# Step 2b: train the MLP (~10-20 min on CPU, less with GPU)
-python -m scenarios.emergency_braking.train
-```
-
-The trained model is saved to `scenarios/emergency_braking/models/emergency_braking_mlp.keras`.
-A `training_curves.png` plot is also saved there.
-
-> **Note:** model files and datasets are excluded from git (`.gitignore`).
-> Anyone cloning the repo must run this step before using NN mode.
-
-### 3 — Validate the pipeline (optional but recommended)
-
-```bash
-python scripts/validate_pipeline.py --n 200
-```
-
-Should print `ALL PASS` for both Physics and NN modes.
-
-### 4 — Start the API server
-
-```bash
-# Windows: double-click start.bat, or:
-uvicorn api.server:app --host 0.0.0.0 --port 8001 --reload
-```
-
-### 5 — Open the frontend
-
-Open `frontend/index.html` directly in your browser. The header shows `⬤ API online` when the server is reachable.
-
----
-
-## Project structure
-
-```
-scenarios/
-  emergency_braking/
-    config.py           # EmergencyBrakingScenario (use_nn flag)
-    train.py            # dataset generation + MLP training
-    nn_controller.py    # BrakingMLP (Keras Sequential)
-    nn_simulator.py     # time integration driven by MLP
-    dataset/            # ← generated, not in git
-    models/             # ← generated, not in git
-  cut_in/               # Blocco 2 (in development)
-  lane_keeping/         # Blocco 3 (Udacity DNN, requires Docker)
-  base_scenario.py      # abstract BaseScenario interface
-  __init__.py           # SCENARIOS registry
-
-simulators/
-  base_simulator.py
-  emergency_braking.py  # physics simulator (+ run_with_actuals)
-
-embedder/
-  pod.py                # Proper Orthogonal Decomposition via SVD
-
-pipeline/
-  orchestrator.py       # run(): LHS → sim → QoI → POD → rare failures + P(failure)+CI
-                        # run_rare_event(): Cross-Entropy rare-event estimate
-  severity.py           # find_severe_failures() (severity axis, bottom-k%)
-  rare_event.py         # Cross-Entropy + importance sampling P(failure) estimator
-  active_boundary.py    # active-learning of the fail/safe boundary (GP + ARD importance)
-  # --- sampling-design comparison (feature branch) ---
-  samplers.py               # BaseSampler / LHSSampler / RandomSampler, one interface
-  active_boundary_random.py # active boundary as a class, LHS or random design
-  rare_event_random.py      # Cross-Entropy as a class, LHS or random design
-  failure_regions.py        # cluster failure regions, compare them, price a blind hit
-  model_comparison.py       # run every arm at a matched budget and report
-  qoi_optimizer.py          # worst-case search: minimise the QoI (BayesOpt / CMA-ES)
-  odd_presets.py            # ODD presets + the --max-angle/--max-speed narrowing rules
-
-api/
-  server.py             # FastAPI: /scenarios /run /status /explain /health
-  schemas.py            # Pydantic models
-
-evaluation/
-  qoi.py                # safety margin + failure indicator
-
-frontend/
-  index.html            # 3-screen SPA (scenario → config → results)
-
-scripts/
-  validate_pipeline.py  # end-to-end smoke test
-  sanity_check.py       # physics sanity (speed sweep)
-  validate_qoi.py       # QoI distribution check
-  validate_pod.py       # POD embedder check
-  run_lanekeeping.py    # lane-keeping pipeline runner (readable report)
-  run_rare_event.py     # Cross-Entropy rare-event runner (Docker)
-  sweep_lanekeeping.py  # ODD grid sweep (failure rate over speed x angle)
-  envelope_lanekeeping.py # P(failure) vs meters-per-steer curve (operational envelope)
-  validate_rare_probability.py # in-process validation of the P estimate + Wilson CI
-  validate_rare_event.py       # in-process validation of the Cross-Entropy estimator
-  # --- active-learning boundary (feature branch) ---
-  run_active_boundary.py   # active-learning boundary on the Unity DNN (any BaseScenario)
-  validate_active_boundary.py # active-boundary P vs brute-force MC (correctness + efficiency)
-  # --- sampling-design comparison (feature branch) ---
-  run_model_comparison.py     # all arms at a matched budget + failure-region report (Docker)
-  run_qoi_optimizer.py        # worst-case search on the QoI (Docker)
-  validate_model_comparison.py # Docker-free validation of the whole comparison
-```
-
----
-
-## Scenario parameters
-
-### Emergency Braking
-
-| Parameter | Range | Description |
-|---|---|---|
-| `initial_speed` | 5–50 m/s | Vehicle speed at obstacle detection |
-| `friction_coefficient` | 0.3–1.0 | Road grip (0.3 = wet/icy, 1.0 = dry asphalt) |
-| `detection_distance` | 10–100 m | Distance to obstacle when detected |
-| `nominal_delay` | 0.05–0.5 s | Braking system reaction delay |
-
-The **safety margin** = `detection_distance - final_position - 2 m`. Negative = crash.
-
----
-
-## Pipeline parameters (frontend)
-
-| Parameter | Description |
+| factor | levels |
 |---|---|
-| **Samples (N)** | Number of LHS points to simulate. More = better rare-failure coverage, but slower. |
-| **Seed** | Random seed — same seed reproducibly gives the same LHS points. |
-| **Rare fraction (%)** | Bottom-k% of failures to flag as "rare". 5% = only the worst crashes. |
-| **Param bounds** | Editable lower/upper per parameter — narrow them to focus sampling on a specific region. |
+| search family | `active_boundary` (GP surrogate + boundary acquisition), `cross_entropy` (CE + importance sampling), `plain_sampling` (the floor) |
+| sampling design | `lhs` (Latin Hypercube) vs `random` (i.i.d.) |
+
+Six arms, run on two backends (**Udacity + Docker**, a DNN driving from camera
+images; **MetaDrive**, an in-process lateral controller on exact state), with a
+pre-registered hypothesis sequence and 12 seeds per campaign.
+
+### The answers, in one paragraph
+
+Active boundary finds **13 to 30 times more rare failures per simulation** than
+any other arm, twice demonstrated on MetaDrive (p <= 0.00073, paired by seed).
+**LHS does not beat random sampling** — a clean, replicated negative result
+across two simulators, two ODDs and three search families. **Cross-entropy is
+the worst method for finding rare events** here, and its P(failure) estimate is
+unusable at this budget. And the two simulators **do not agree** on which
+scenarios are hard (Spearman rho = -0.020 over the same 60 scenarios).
+
+Numbers, statistical tests, caveats and limits: `docs/risultati_sperimentazione.md`.
 
 ---
 
-## Scenarios status
+## Repository map
 
-| Scenario | Physics | NN | Requires |
-|---|---|---|---|
-| Emergency Braking | ✅ | ✅ (train first) | nothing |
-| Cut-In | 🚧 Blocco 2 | 🚧 Blocco 2 | nothing |
-| Lane Keeping | ✅ (existing) | ✅ (existing Udacity DNN) | Docker (opensbt-core) |
+```
+docs/
+  risultati_sperimentazione.md      # THE REPORT — read this first
+  preregistrazione_classifica.json          # hypothesis sequence, committed before the data
+  preregistrazione_replica_degradata.json   # same, for the replication campaign
+
+pipeline/                           # the algorithms under comparison
+  samplers.py                       # LHSSampler / RandomSampler behind one interface
+  active_boundary.py                # GP surrogate on the continuous margin
+  active_boundary_random.py         # ... as an arm, with either design
+  rare_event.py                     # cross-entropy + importance sampling
+  rare_event_random.py              # ... as an arm, with either design
+  model_comparison.py               # campaign harness: every arm at a matched budget
+  arm_ranking.py                    # rarity metric, paired tests, pre-registered sequence
+  failure_regions.py                # DBSCAN regions, axis_spread, structure_score
+  operating_point.py                # bisection calibration of speed_scale / obs_lag
+  odd_presets.py                    # ODD presets and narrowing rules
+  cross_simulator.py                # Udacity <-> MetaDrive comparison on a shared design
+  qoi_optimizer.py                  # worst-case search (BayesOpt / CMA-ES)
+
+scenarios/
+  common/                           # shared across backends: driver, road frame,
+                                    # road geometry, episode budget
+  lane_keeping/                     # backend A — Udacity DNN over HTTP (Docker)
+  lane_keeping_md/                  # backend B — MetaDrive, in-process, headless
+  base_scenario.py                  # the interface every backend implements
+
+scripts/                            # campaign entry points (see "Reproducing")
+tests/                              # 177 tests, no Docker and no MetaDrive needed
+results/                            # campaign outputs (git-ignored, see report §11)
+opensbt-core/                       # Udacity simulator + containers
+```
+
+Modules that pre-date this experiment (`api/`, `embedder/`, `frontend/`,
+`evaluation/`, `simulators/`, the `emergency_braking` and `cut_in` scenarios)
+are the earlier framework the project was built on. They are untouched and
+documented in the appendix at the bottom.
 
 ---
 
-## Lane Keeping — how it works and how to run it
+## Setup
 
-The Lane Keeping scenario stress-tests a neural-network autopilot (the Udacity "chauffeur" DNN) by driving it on procedurally generated roads and measuring how well it stays inside the lane. Unlike Emergency Braking and Cut-In, which run in-process, here the actual driving happens inside the opensbt-core Unity simulator, which the Python code drives over HTTP: for each sampled scenario the client sends the road parameters to the simulator, the simulator runs the drive, and returns the trajectory (position, cross-track error and steering, step by step).
+Two environments are needed, because MetaDrive requires Python < 3.12:
+
+```bash
+python -m venv .venv        && .venv/Scripts/pip install -e .          # Udacity + pipeline
+python3.10 -m venv .venv310 && .venv310/Scripts/pip install -e . metadrive-simulator
+.venv310/Scripts/python -m metadrive.pull_asset
+```
+
+The **Udacity** backend additionally needs Docker and two files that are not in
+the repo (download links in `opensbt-core/README.md`):
+
+- `mixed-chauffeur.h5` in `opensbt-core/Simulator/SelfDrivingModels/`
+- the Ubuntu simulator build in `opensbt-core/Simulator/SimulatorExec/ubuntu_binaries/`
+  (`ubuntu.x86_64`, executable)
+
+MetaDrive needs neither Docker nor a GPU.
+
+---
+
+## Reproducing the campaigns
+
+The exact commands behind every number in the report are in
+`docs/risultati_sperimentazione.md` §11. In short:
+
+```powershell
+# --- MetaDrive campaigns (~1.4-2.0 s per simulation) ---
+.venv310\Scripts\python.exe scripts\run_model_comparison_md.py --budget 120 ^
+       --seeds 0 1 2 3 4 5 6 7 8 9 10 11 --out results\cmp_md12
+
+# --- Udacity campaigns (~30 s per simulation; start the container pool first) ---
+python scripts\run_model_comparison.py --budget 120 --seeds 0 1 2 3 4 5 ^
+       --max-angle 8 --max-speed 9.6 --max-seg 12 --out results\cmp_rare
+
+# --- operating-point calibration ---
+.venv310\Scripts\python.exe scripts\calibrate_operating_point.py lane_keeping_md ^
+       --lever obs_lag --sampling odd --max-angle 8 --max-speed 9.6 --max-seg 12 ^
+       --n 120 --low 0.02 --high 0.10 --out results\taratura_md_narrow_lag_odd.json
+
+# --- rankings and the pre-registered sequence (no simulation, seconds) ---
+python scripts\rank_arms.py results\cmp_md12_raw.npz --regions ^
+       --plan docs\preregistrazione_classifica.json --out results\rank_md12
+
+# --- cross-simulator comparison on a shared design ---
+.venv310\Scripts\python.exe scripts\run_cross_simulator.py collect lane_keeping_md --n 60 --speed-scale 0.1766
+python scripts\run_cross_simulator.py collect lane_keeping --n 60 --speed-scale 0.42
+python scripts\run_cross_simulator.py compare results\cross_lane_keeping_md.json results\cross_lane_keeping.json
+```
+
+Analysis scripts (`rank_arms.py`, `reanalyze_regions.py`, `run_cross_simulator.py compare`)
+re-read the saved `.npz`/`.json` and run in seconds — they never re-simulate, so
+every table in the report can be regenerated from the files in `results/`
+without a simulator.
+
+Supporting scripts, all optional:
+
+| script | what it answers |
+|---|---|
+| `scripts/reanalyze_regions.py` | structure vs shuffled z-scores (report §7) |
+| `scripts/check_repeatability.py` | how deterministic is the simulator? (report §1.4) |
+| `scripts/validate_model_comparison.py` | LHS-vs-random on analytic regions, no Docker |
+| `scripts/diag_road_parity.py` | same theta, same road? the cross-simulator gate |
+| `scripts/diag_odd_feasibility.py` | is the ODD physically drivable at all? |
+| `scripts/plot_boundary_md.py` | the learned fail/safe boundary in (curvature, speed) |
+
+---
+
+## Tests
+
+```bash
+python -m pytest tests -q
+```
+
+177 tests pass without Docker and without MetaDrive; 38 more are skipped unless
+those are installed. `tests/test_arm_ranking.py` alone carries 33 tests,
+including a regression for every pipeline defect listed in report §8.
+
+---
+
+## What was set aside
+
+The final cleanup moved out of the repo everything the reported experiment does
+not use. Nothing was deleted: it all sits under `_archive/` (git-ignored) and
+in the git history.
+
+| archived | why |
+|---|---|
+| `_archive/carla/` | the CARLA backend never became available (report §10.10): the geometric parity gate fails at 19.3 cm and the GPU is too small. The canonical road generator that lived inside it was moved to `scenarios/common/road_geometry.py` first, where it belongs. |
+| `_archive/behavior_cloning/` | a learned MetaDrive driver, never used: every reported campaign runs the shared lateral controller. |
+| `_archive/diagnostici/` | one-off diagnostics for geometry bugs that are now fixed and covered by `tests/test_road_parity.py`. |
+| `results/_archive/` | campaigns no table in the report cites: a trial run, a superseded `obs_lag` calibration, a probe. |
+| `_archive/RESULTS.md` | an earlier results document, superseded by `docs/risultati_sperimentazione.md`. |
+| `results/_archive/pre_rinomina_campi/` | the seven JSON files as they were before their field names were translated to English. Backups, not campaigns. |
+
+---
+
+## Appendix — Lane Keeping on Udacity: operational details
 
 ### Architecture: a pool of parallel simulators
 
@@ -282,110 +284,26 @@ This yields a concrete requirement: `control_rate ≥ target_speed / 0.6`. At Un
 | `XVFB_RESOLUTION` | container | 320x240x24 | virtual display resolution |
 | `UNITY_SCREEN_WIDTH/HEIGHT/QUALITY` | container | 320 / 240 / Fastest | Unity render resolution/quality |
 
-Emergency Braking and Cut-In do **not** require Docker.
-
 ---
 
-## Active-learning of the failure boundary (feature branch)
+## Appendix — the pre-existing framework
 
-On top of the existing pipeline this branch adds a method that *learns* where the controller fails and applies it to the real Udacity DNN. It is **additive** — the existing scenarios and pipeline are untouched — and plugs into the same `BaseScenario` interface. See `RESULTS.md` for the empirical findings.
-
-### Method (`pipeline/active_boundary.py`)
-
-Where `run()` gives severity (bottom-k%) and `run_rare_event()` gives rarity (P), this learns **where and why** a scenario fails: a Gaussian-Process model of the safety margin over the parameter space, refined by sampling adaptively near the fail/safe boundary. It returns P(failure) with a credible interval, the ARD **feature importance** (which parameters drive the failure), and the concrete failing scenarios. It is **backend-agnostic**: it runs on the real Unity DNN (`--scenario lane_keeping`) exactly as on any `BaseScenario`.
-
-```bash
-python scripts/run_active_boundary.py --scenario lane_keeping                  # real DNN (needs Docker)
-python scripts/run_active_boundary.py --scenario lane_keeping --max-angle 8 --max-speed 10 --max-seg 14
-```
-
-Both `run_active_boundary.py` and `run_rare_event.py` accept ODD-narrowing flags to target the rare regime: `--max-angle`, `--max-speed`, `--min-speed`, `--max-seg`, `--min-seg`. Narrowing the ODD until failures become rare is how a genuine rare failure is surfaced (see `RESULTS.md`).
-
-### What it produced on the real model
-
-Applied to the real Udacity DNN in Unity, the active-boundary method was **cross-validated against the existing Cross-Entropy estimator** (they agree on P at the same ODD), and used to **quantify the model's safety envelope in speed** and to extract concrete, reproducible **rare-failure scenarios** (P ≈ 2% at 9–10 m/s). Full numbers in `RESULTS.md`.
-
-### Validation
-
-- `python scripts/validate_active_boundary.py` — active-boundary P vs brute-force Monte Carlo (correctness confirmed; the GP surrogate is **not** more sample-efficient than plain MC for estimating P — an honest limitation, so the method's value is the boundary + importance, not the P estimate).
-- Tests: `pytest tests/test_active_boundary.py -q`.
-
----
-
-## LHS vs random search, and the worst case (feature branch `random_search_comparison`)
-
-Three additions, all **additive**: no existing module changes behaviour, and every new class
-speaks the same `BaseScenario` interface as the rest of the pipeline.
-
-### 1. The same algorithms on a random design
-
-`pipeline/samplers.py` puts the two designs behind one interface (`LHSSampler`, `RandomSampler`),
-and the algorithms are re-exposed as classes that take one:
-
-| class | module | design |
-|---|---|---|
-| `LHSActiveBoundary` / `RandomSearchActiveBoundary` | `pipeline/active_boundary_random.py` | seed design + acquisition pool |
-| `LHSCrossEntropy` / `RandomSearchCrossEntropy` | `pipeline/rare_event_random.py` | every CE batch |
-| `PlainSamplingBaseline` | `pipeline/model_comparison.py` | one-shot sampling, the floor |
-
-Budgets are matched by construction, and the final ODD integration stays stratified in **both**
-arms so the comparison measures the search, not the quadrature.
-
-> Note worth knowing: `pipeline/rare_event.py` never used LHS — it draws with `rvs`, i.e. it is
-> already i.i.d. random sampling. So for Cross-Entropy the *new* arm is the stratified one, and
-> `RandomSearchCrossEntropy` reproduces today's behaviour. Stratifying matters there because
-> gamma is a quantile of the sampled margins: an unstratified batch that misses the tail sends
-> the whole descent toward the wrong mode.
-
-### 2. Do the methods find the same failure regions?
-
-`pipeline/failure_regions.py` clusters the failing points (DBSCAN in the normalised cube, isolated
-failures kept as their own region) into one **shared** map built from the union of all arms, then
-reports per pair the Jaccard index of the discovered regions and a clustering-free point-coverage
-measure. For each region it also prices a blind hit: `P(hit)`, `P(hit in n draws)` and `n50`, the
-number of blind draws needed for an even chance. `pipeline/model_comparison.py` runs the campaign
-over several seeds and prints/saves the whole thing (`.json` + two `.csv`).
+The repository started as a general rare-failure framework: an LHS sampler, a
+POD trajectory embedder, a QoI module, a FastAPI server and a small browser
+frontend, with two in-process scenarios (Emergency Braking, Cut-In). None of it
+is on the path of the experiment reported here, and none of it was touched by
+the cleanup.
 
 ```bash
-python scripts/run_model_comparison.py --budget 120 --seeds 0 1 2        # needs Docker
-python scripts/run_model_comparison.py --preset realistic --max-angle 20 --out results/cmp
-python scripts/validate_model_comparison.py                              # no Docker, ~2 min
+python -m scenarios.emergency_braking.train --dataset-only   # generate the dataset
+python -m scenarios.emergency_braking.train                  # train the MLP (~15 min CPU)
+python scripts/validate_pipeline.py --n 200                  # end-to-end smoke test
+uvicorn api.server:app --host 0.0.0.0 --port 8001 --reload   # API; frontend/index.html is the UI
 ```
 
-### 3. Worst-case search on the QoI
-
-`pipeline/qoi_optimizer.py` minimises the safety margin — `argmin margin(theta)` — with either a
-GP + Expected Improvement (`BayesianQoIOptimizer`, most sample-efficient) or a self-contained
-CMA-ES (`CMAESQoIOptimizer`, evaluates a full generation per step, so it fills the worker pool).
-Both plug into the comparison harness as extra arms.
-
-```bash
-python scripts/run_qoi_optimizer.py --method bayes --budget 120
-python scripts/run_qoi_optimizer.py --compare --budget 120
-```
-
-The minimiser is the **worst** case, not the **likeliest** one: read it next to the rare-event
-probability, never instead of it.
-
-### What the validation actually shows
-
-`scripts/validate_model_comparison.py` measures the LHS advantage directly, on regions defined by
-1, 2 and 4 parameters (n = 64 points, 400 replications):
-
-| failure region | volume | i.i.d. analytic | LHS | random |
-|---|---|---|---|---|
-| 1 axis, `\|p2-0.42\|<0.01` | 0.0200 | 72.6% | **90.5%** | 68.0% |
-| 2 axes, slab & `p3>0.9` | 0.0040 | 22.6% | 23.5% | 23.3% |
-| 2 axes, `p0>0.8 & p1>0.8` | 0.0400 | 92.7% | 95.0% | 93.8% |
-| 4 axes, all in `[0,0.35]` | 0.0150 | 62.0% | 67.0% | 60.5% |
-
-LHS controls the **1-D projections**, not the joint occupancy of the cube: the gain is large when
-one dominant parameter drives the failure and fades as more parameters must conspire. The claim
-"LHS reaches rare regions random search misses" is therefore true in the marginal-effect regime
-and should be stated that way.
-
-### Tests
-
-```bash
-pytest tests/test_random_search_comparison.py -q      # 31 tests, mock scenarios, no Docker
-```
+| Scenario | Physics | NN | Requires |
+|---|---|---|---|
+| Emergency Braking | yes | yes (train first) | nothing |
+| Cut-In | in development | in development | nothing |
+| Lane Keeping (Udacity) | — | yes | Docker |
+| Lane Keeping (MetaDrive) | yes | — | metadrive-simulator |

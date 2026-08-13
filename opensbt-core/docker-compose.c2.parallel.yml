@@ -1,0 +1,51 @@
+# --- GENERATO da gen_c2_compose.py -- non modificare a mano ------------------
+# 1 worker del braccio C2 su porte host 8000..8000 (container: sempre 8000).
+#
+# C2 = controller state-based condiviso con MetaDrive e CARLA. Isola l'effetto
+# del simulatore tenendo costante il controller.
+#
+# Avvio:  docker compose -f docker-compose.c2.parallel.yml up --build
+# Client: NUM_WORKERS=1
+#
+# ⚠️ Throughput contro fedeltà. Misurato su Udacity: 20.8 Hz con 1 container,
+# 8.5 Hz con 4, perché le istanze Unity si contendono la CPU. Il controller
+# compensa (il limite di sterzata è in unità/secondo, convertito col dt reale),
+# ma il control rate resta una variabile confondente rispetto a MetaDrive e
+# CARLA, dove è esatto per costruzione. Per la campagna di confronto conviene
+# 1 worker; per le prove esplorative, 4.
+services:
+
+  simulator-0:
+    platform: linux/amd64
+    # Solo questo servizio costruisce: l'immagine viene riusata dagli altri.
+    build:
+      context: .
+      dockerfile: Simulator/Dockerfile
+    image: paologinefra/se2rp-simulator
+    container_name: se2rp-c2-0
+    # ⚠️ Il `command` sostituisce l'INTERO CMD del Dockerfile, che non si limita
+    # a lanciare uvicorn: avvia prima Xvfb ed esporta DISPLAY=:99.
+    #
+    # Unity è un'applicazione grafica e pretende un display anche in headless:
+    # senza Xvfb il processo parte ma non riesce a creare il contesto GL, non si
+    # connette al server socket.io, e il container resta per sempre su
+    # "sleep...and repeat to connect" senza un errore esplicito.
+    #
+    # Quindi qui il bootstrap va replicato per intero, cambiando solo il modulo
+    # uvicorn. Se un giorno cambia il CMD del Dockerfile, va aggiornato anche qui.
+    #
+    # `$$` e non `$`: in un compose `${VAR}` lo espande Docker sull'HOST, dove
+    # XVFB_RESOLUTION non esiste. `$$` lo passa letterale a /bin/sh, che lo
+    # risolve dentro il container contro la ENV del Dockerfile.
+    command: '/bin/sh -c "rm -f /tmp/.X99-lock; Xvfb :99 -screen 0 $${XVFB_RESOLUTION:-320x240x24} -ac +extension GLX +extension RANDR +render -noreset & sleep 3 && export DISPLAY=:99 && uvicorn Simulator.c2.server:app --host 0.0.0.0 --port 8000"'
+    ports:
+      - "8000:8000"
+    environment:
+      - LK_SPEED_SCALE=0.42
+      - LK_STEERING_SIGN=-1.0
+      - LK_OBS_LATENCY=0
+      - LK_OBS_LAG_TAU=0.0
+      - LK_STEER_NOISE=0.0
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

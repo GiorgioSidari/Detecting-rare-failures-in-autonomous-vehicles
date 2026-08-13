@@ -28,8 +28,76 @@ This does not validate the simulator: it assumes the margin (via the QoI) is alr
 """
 
 from dataclasses import dataclass, field
+import warnings
+
 import numpy as np
 from scipy import stats
+
+
+# ── The floor below which the final estimate stops being an estimate ─────────
+#
+# The defensive mixture draws ``n_f = alpha * final_samples`` points from f and
+# the rest from the tilted proposal q. Points drawn from q are re-weighted by
+# f/d, which goes to zero once q has walked away from f's bulk -- exactly what
+# the CE descent is designed to make happen. So the estimate effectively rests
+# on the n_f points drawn from f, each carrying weight at most 1/alpha.
+#
+# With n_f = 9 (what a 120-simulation budget produces) the estimator can only
+# return multiples of (1/alpha)/final_samples: it degenerates into a 9-sample
+# Monte Carlo whose value is 0 whenever those 9 draws miss the failure region.
+# That is not a small-sample inaccuracy, it is a different estimator, and it
+# will happily report 0 or 1e-9 for a probability of 3e-2.
+#
+# 30 is the point below which the quantisation dominates everything else. It is
+# a floor, not a target: a usable estimate of a probability p needs roughly
+# (1-p)/(p * rel_err^2) defensive draws.
+MIN_DEFENSIVE_SAMPLES = 30
+
+
+def defensive_sample_count(final_samples: int, alpha: float) -> int:
+    """Points the final estimate actually draws from f (the usable ones)."""
+    return int(alpha * int(final_samples))
+
+
+def check_defensive_budget(final_samples: int, alpha: float, *, label: str = "",
+                           stacklevel: int = 3) -> bool:
+    """
+    Warn when the final IS estimate has too few defensive draws to be a
+    probability estimate. Returns True when the budget is adequate.
+
+    Deliberately a warning and not an exception: the CE descent is still a
+    legitimate search even when its probability estimate is not usable, and the
+    comparison harness wants the failures it finds. The caller is expected to
+    carry ``p_fail_usable`` forward so the number is never read as an estimate.
+    """
+    n_f = defensive_sample_count(final_samples, alpha)
+    if n_f >= MIN_DEFENSIVE_SAMPLES:
+        return True
+    who = f"{label}: " if label else ""
+    warnings.warn(
+        f"{who}the final importance-sampling estimate draws only {n_f} points "
+        f"from f (alpha={alpha:g} x final_samples={int(final_samples)}); below "
+        f"{MIN_DEFENSIVE_SAMPLES} the estimator degenerates into an {n_f}-sample "
+        f"Monte Carlo quantised at multiples of {1.0 / max(n_f, 1):.4g}. "
+        "p_fail is NOT a usable probability at this budget -- use the evaluated "
+        "cloud (failures, margins, regions) and read p_fail from a plain-sampling "
+        f"arm instead. Raise final_samples to at least "
+        f"{int(np.ceil(MIN_DEFENSIVE_SAMPLES / max(alpha, 1e-9)))}.",
+        RuntimeWarning, stacklevel=stacklevel)
+    return False
+
+
+def effective_sample_size(w: np.ndarray) -> float:
+    """
+    Kish ESS of the importance weights: (sum w)^2 / sum(w^2).
+
+    The single number that says how many of the final samples are actually
+    carrying the estimate. When it collapses toward alpha*final_samples the
+    tilted half of the mixture is contributing nothing.
+    """
+    w = np.asarray(w, dtype=float)
+    s2 = float((w ** 2).sum())
+    return float((w.sum() ** 2) / s2) if s2 > 0 else 0.0
 
 
 @dataclass
@@ -42,6 +110,10 @@ class RareEventResult:
     q_scale: np.ndarray                 # final proposal scale
     gamma_history: list = field(default_factory=list)   # per-iteration gamma thresholds
     n_fail_effective: int = 0           # failing samples in the final estimate (diagnostic)
+    # ── estimate-quality diagnostics (see MIN_DEFENSIVE_SAMPLES) ────────────
+    n_defensive: int = 0                # points drawn from f in the final estimate
+    ess: float = 0.0                    # Kish ESS of the IS weights
+    p_fail_usable: bool = True          # False => p_fail is not a probability estimate
 
 
 def scenario_margin_fn(scenario):
@@ -125,6 +197,8 @@ def estimate_failure_probability(
     lo = np.asarray(lower, dtype=float)
     hi = np.asarray(upper, dtype=float)
     d = len(lo)
+    usable = check_defensive_budget(final_samples, alpha,
+                                    label="estimate_failure_probability")
 
     # Init the proposal from f's moments (q0 matches f in shape).
     loc = np.array([float(fd.mean()) for fd in f_dists])
@@ -187,4 +261,7 @@ def estimate_failure_probability(
         q_scale=scale,
         gamma_history=gamma_hist,
         n_fail_effective=int(fail.sum()),
+        n_defensive=defensive_sample_count(final_samples, alpha),
+        ess=effective_sample_size(w),
+        p_fail_usable=bool(usable),
     )

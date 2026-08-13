@@ -2,21 +2,21 @@
 Test pipeline completa per LaneKeepingScenario.
 
 Esegue la pipeline end-to-end:
-    LHS sampling → simulazione Docker → QoI composita → POD embedding → rare failures
+    LHS sampling -> Docker simulation -> composite QoI -> POD embedding -> rare failures
 
 Output:
-    - testo dettagliato a terminale per ogni campione
-    - tests/output/pipeline_results.png  con tre grafici:
-        1. XTE nel tempo per tutti i run (safe=verde, failure=rosso)
+    - detailed terminal text for every sample
+    - tests/output/pipeline_results.png with three plots:
+        1. XTE over time for every run (safe=green, failure=red)
         2. Scatter plot POD mode 1 vs mode 2 (safe vs failure)
-        3. Decomposizione QoI (M1, M2, M3) per campione
+        3. QoI decomposition (M1, M2, M3) per sample
 
-Uso:
+Usage:
     cd /path/to/Detecting-rare-failures-in-autonomous-vehicles
     python3 tests/test_pipeline_lane_keeping.py [--n N]
 
-Argomenti opzionali:
-    --n N   numero di campioni LHS (default: 20)
+Optional arguments:
+    --n N   number of LHS samples (default: 20)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")          # no finestra grafica — salva solo su file
+matplotlib.use("Agg")          # no graphical window -- save to file only
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from scipy.stats.qmc import LatinHypercube, scale
@@ -54,7 +54,7 @@ COLOR_RARE    = "#8e44ad"
 def compute_qoi_components(sc: LaneKeepingScenario,
                            traj: np.ndarray,
                            params: np.ndarray):
-    """Restituisce M1, M2, M3 e QoI separatamente per ogni run."""
+    """Returns M1, M2, M3 and the QoI separately for every run."""
     N, T, _ = traj.shape
     xte      = traj[:, :, 2].astype(np.float64)
     steering = traj[:, :, 3].astype(np.float64)
@@ -118,9 +118,9 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
         fontsize=13, fontweight="bold"
     )
 
-    # ── Grafico 1: XTE nel tempo ──────────────────────────────────────────────
+    # -- Plot 1: XTE over time -------------------------------------------------
     ax = axes[0]
-    ax.set_title("XTE nel tempo (tutti i run)", fontsize=11)
+    ax.set_title("XTE over time (all runs)", fontsize=11)
     for i in range(N):
         L   = run_lengths[i]
         xte = traj[i, :L, 2]
@@ -162,7 +162,7 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
             ax.annotate(f"#{idx+1}", (pod_codes[idx, 0], pod_codes[idx, 1]),
                         fontsize=8, xytext=(5, 5), textcoords="offset points")
     else:
-        ax.text(0.5, 0.5, "POD ha 1 solo modo\n(traiettorie troppo simili)",
+        ax.text(0.5, 0.5, "POD has a single mode\n(trajectories too similar)",
                 ha="center", va="center", transform=ax.transAxes)
     ax.set_xlabel("POD mode 1")
     ax.set_ylabel("POD mode 2")
@@ -170,7 +170,7 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
 
     # ── Grafico 3: Decomposizione QoI (M1, M2, M3) ────────────────────────────
     ax = axes[2]
-    ax.set_title("Componenti QoI per campione", fontsize=11)
+    ax.set_title("QoI components per sample", fontsize=11)
     x   = np.arange(N)
     w   = 0.25
     b1  = ax.bar(x - w, m1, w, label="M1 (XTE margin × 0.6)",      color="#3498db", alpha=0.85)
@@ -178,7 +178,7 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
     b3  = ax.bar(x + w, m3, w, label="M3 (early approach × 0.2)",   color="#9b59b6", alpha=0.85)
     ax.axhline(0, color="black", linewidth=0.8)
 
-    # Evidenzia i failure con sfondo
+    # Highlight the failures with a background
     for i in range(N):
         if fail_mask[i]:
             ax.axvspan(i - 0.5, i + 0.5, alpha=0.08,
@@ -194,7 +194,7 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
     ax = axes[3]
     ax.set_title("segment_length vs QoI", fontsize=11)
     if params is not None:
-        seg_idx = 7   # colonna segment_length nel vettore parametri
+        seg_idx = 7   # segment_length column in the parameter vector
         seg = params[:, seg_idx]
         ax.scatter(seg[safe_mask],         qoi[safe_mask],
                    c=COLOR_SAFE,    s=60, label="safe",         alpha=0.8, zorder=2)
@@ -213,7 +213,7 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
         ax.set_ylabel("QoI")
         ax.legend(fontsize=9)
     else:
-        ax.text(0.5, 0.5, "params non disponibili",
+        ax.text(0.5, 0.5, "params not available",
                 ha="center", va="center", transform=ax.transAxes)
 
     plt.tight_layout()
@@ -235,7 +235,7 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
     print(f"\n  {len(bounds['names'])} parametri campionati:")
     for name, lo, hi in zip(bounds["names"], bounds["lower"], bounds["upper"]):
         print(f"    {name:<22}  [{lo:.1f}, {hi:.1f}]")
-    print(f"\n  Tabella campioni (righe = run, colonne = parametri):")
+    print(f"\n  Sample table (rows = runs, columns = parameters):")
     header = "  #    " + "  ".join(f"{n[:8]:>8}" for n in bounds["names"])
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -249,7 +249,7 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
     print(f"\n  Attendi completamento...\n")
 
     t0      = time.time()
-    traj    = sc.run_simulation(params, verbose=True)   # stampa ogni job appena finisce
+    traj    = sc.run_simulation(params, verbose=True)   # prints each job as it finishes
     elapsed = time.time() - t0
 
     all_run_lengths = sc._run_lengths
@@ -267,22 +267,22 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
     for i in range(n_samples):
         L       = all_run_lengths[i]
         max_xte = np.abs(traj[i, :L, 2]).max()
-        esito   = "✗ FAIL" if failures[i] else "✓ safe"
-        print(f"  {i+1:3d}  {qoi[i]:+7.3f}  {m1[i]:+7.3f}  {m2[i]:+7.3f}  {m3[i]:+7.3f}  {max_xte:8.4f}m  {esito}")
+        outcome   = "✗ FAIL" if failures[i] else "✓ safe"
+        print(f"  {i+1:3d}  {qoi[i]:+7.3f}  {m1[i]:+7.3f}  {m2[i]:+7.3f}  {m3[i]:+7.3f}  {max_xte:8.4f}m  {outcome}")
     print(f"\n  Failure rate: {failures.sum():.0f} / {n_samples}  ({fail_rate*100:.1f}%)")
 
     # ── 4. POD embedding ─────────────────────────────────────────────────────
-    print_section("STEP 4 — POD embedding delle traiettorie")
-    # Usa x, XTE e steering (canali 0, 2, 3): y è ridondante con XTE (posizione laterale)
-    # x fornisce la struttura temporale dominante che concentra la varianza nel primo modo
+    print_section("STEP 4 -- POD embedding of the trajectories")
+    # Uses x, XTE and steering (channels 0, 2, 3): y is redundant with XTE (lateral position)
+    # x provides the dominant temporal structure that concentrates the variance in the first mode
     traj_pod  = traj[:, :, [0, 2, 3]]         # (N, T, 3): x + xte + steering
     pod       = EmbedderPOD(variance_threshold=0.99)
     pod_codes = pod.fit_transform(traj_pod)   # (N, k)
 
     print(f"\n  Traiettorie complete: {traj.shape}  (4 canali: x, y, xte, steering)")
     print(f"  Input POD:            {traj_pod.shape}  (3 canali: x, xte, steering — y rimossa)")
-    print(f"  Modi POD selezionati: {pod.nModes}  (spiegano ≥99% della varianza)")
-    print(f"  Codici POD:           {pod_codes.shape}  (ogni run → {pod.nModes} numeri)")
+    print(f"  POD modes selected: {pod.nModes}  (explaining >=99% of the variance)")
+    print(f"  POD codes:          {pod_codes.shape}  (each run -> {pod.nModes} numbers)")
 
     # Varianza spiegata per modo
     flat   = traj_pod.reshape(n_samples, -1)
@@ -308,8 +308,8 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
         print(f"\n  Nessun rare failure trovato (fraction={rare_fraction}).")
         print(f"  Con {failures.sum():.0f} failure su {n_samples}, prova ad aumentare N.")
     else:
-        print(f"\n  Rare failures (bottom {rare_fraction*100:.0f}% dei failure per QoI):"
-              f"  {len(rare_idx)} campioni")
+        print(f"\n  Rare failures (bottom {rare_fraction*100:.0f}% of failures by QoI):"
+              f"  {len(rare_idx)} samples")
         print(f"\n  {'#':>3}  {'QoI':>7}  angoli                          speed   seg   map")
         print("  " + "-" * 72)
         for idx in rare_idx:
@@ -324,7 +324,7 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
             rare_codes = pod_codes[rare_mask]
             dist = np.linalg.norm(safe_codes.mean(axis=0) - rare_codes.mean(axis=0))
             print(f"\n  Distanza POD  safe_centroid → rare_centroid: {dist:.4f}")
-            print(f"  (valore alto = i failure rari occupano una zona diversa dello spazio)")
+            print(f"  (a high value = the rare failures occupy a different part of the space)")
 
         # Parametri critici nei rare failures
         seg_vals = [params[idx, 7] for idx in rare_idx]
@@ -350,7 +350,7 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n",    type=int,   default=50,   help="Numero campioni LHS")
+    parser.add_argument("--n",    type=int,   default=50,   help="Number of LHS samples")
     parser.add_argument("--seed", type=int,   default=42,   help="Seed riproducibilità")
     parser.add_argument("--rare", type=float, default=0.30, help="Frazione rare failures")
     args = parser.parse_args()

@@ -161,7 +161,16 @@ class ComparisonResult:
     seeds: list
     budget: int
     param_names: list = field(default_factory=list)
-    failed_runs: list = field(default_factory=list)   # (label, seed, error)
+    failed_runs: list = field(default_factory=list)
+    cloud_seeds: dict = field(default_factory=dict)
+    param_lower: object = None
+    param_upper: object = None
+    odd_dists: object = None
+    threshold: float = 0.0
+    #: Operating point and provenance of the campaign. Without this a result
+    #: file does not say which system it refers to, and two campaigns with
+    #: different speed_scale are indistinguishable after the fact.
+    metadata: dict = field(default_factory=dict)
 
 
     # ── the sensitive test: pair the two designs seed by seed ───────────────
@@ -213,7 +222,16 @@ class ComparisonResult:
                 continue
             entry: dict = {"n_seeds": len(seeds),
                            "min_attainable_p": 2.0 / 2 ** len(seeds)}
+            # p_fail is only a metric when both arms actually estimated a
+            # probability. When the estimator degenerates (too few defensive
+            # draws) the "comparison" is between two quantised few-sample Monte
+            # Carlos and a tie there means nothing at all.
+            p_usable = all(arms[d][s].get("p_fail_usable", True)
+                           for d in ("lhs", "random") for s in seeds)
+            entry["p_fail_usable"] = bool(p_usable)
             for metric, direction in metrics.items():
+                if metric == "p_fail" and not p_usable:
+                    continue
                 if any(metric not in arms[d][s] for d in ("lhs", "random")
                        for s in seeds):
                     continue          # campaign predates this metric
@@ -278,9 +296,36 @@ class ComparisonResult:
         blocks = 1 + sum(1 for a, b in zip(order, order[1:]) if a != b)
         interleaved = blocks > len(set(labels))
 
+        # A nan correlation is NOT the absence of drift: it is the absence of a
+        # measurement. Spearman is undefined when the failure counts have zero
+        # variance (e.g. every run found zero failures), and reporting that as
+        # "no detectable drift" claims a clean bill of health nobody checked.
+        computable = bool(np.isfinite(rho) and np.isfinite(pval))
         return {"spearman_rho": float(rho), "p_value": float(pval),
                 "n_runs": len(idx), "interleaved": bool(interleaved),
-                "drift_detected": bool(np.isfinite(pval) and pval < 0.05)}
+                "computable": computable,
+                "drift_detected": bool(computable and pval < 0.05)}
+
+    def ranking(self, **kw):
+        """
+        Rank the arms by rare-failure yield (see :mod:`pipeline.arm_ranking`).
+
+        Returns None when the campaign has no operational distribution, since
+        rarity is defined against it and there is nothing to rank on otherwise.
+        """
+        if self.odd_dists is None or self.param_lower is None:
+            return None
+        cached = getattr(self, "_ranking_cache", None)
+        if cached is not None and not kw:
+            return cached
+        from pipeline.arm_ranking import rank_arms
+        kw.setdefault("threshold", float(self.threshold))
+        rk = rank_arms(self.clouds, self.param_lower, self.param_upper,
+                       self.odd_dists, cloud_seeds=self.cloud_seeds,
+                       regions=self.regions, per_arm=self.per_arm, **kw)
+        if not kw:
+            self._ranking_cache = rk
+        return rk
 
     def _paired_block(self) -> str:
         """The seed-by-seed LHS vs random table, with its own verdict."""
@@ -324,10 +369,30 @@ class ComparisonResult:
                      f"{m['p_value']:>8.3f}{star}")
         L.append("")
 
+        # The verdict used to read n_failures alone. With zero failures anywhere
+        # that metric is constant, every p is 1.0, and the block printed "no
+        # design difference" directly underneath rows starred at p=0.001 -- and
+        # directly above its own advice to trust the margin over the count.
+        # When the failure count carries no information, say so and fall back to
+        # the metric this report already tells the reader to prefer.
+        total_fail = sum(e["n_failures"]["lhs_mean"] + e["n_failures"]["random_mean"]
+                         for e in pt.values() if "n_failures" in e)
+        counts_informative = total_fail > 0
+        L.append("   READING:")
+        if not counts_informative:
+            L.append("   NOT A COMPARISON OF THE DESIGNS: not one arm produced a")
+            L.append("   single failure, in any seed. There is nothing to find, so")
+            L.append("   'LHS vs random' has no content here — whatever the margin")
+            L.append("   rows above show, they are comparing how far from failure")
+            L.append("   each design stayed, not which one reaches failures.")
+            L.append("   The operating point or the ODD is wrong for this system,")
+            L.append("   not the sampling design.")
+            L.append("=" * w)
+            return "\n".join(L)
+
         best = min((e["n_failures"]["p_value"], f) for f, e in pt.items()
                    if np.isfinite(e["n_failures"]["p_value"]))
         p_best, fam_best = best
-        L.append("   READING:")
         if p_best < 0.05:
             L.append(f"   Stratification finds significantly more failures in "
                      f"{fam_best} (p={p_best:.3f}).")
@@ -354,6 +419,12 @@ class ComparisonResult:
             tag = ("mixed" if dr["interleaved"] else
                    "ARM-MAJOR — the check below cannot be trusted")
             L.append(f"   execution order: {tag}")
+            if not dr.get("computable", True):
+                L.append("   failures vs run order: NOT COMPUTABLE — the failure")
+                L.append("   counts have no variance across runs (every run found")
+                L.append("   the same number). Drift is unmeasured here, not absent.")
+                L.append("=" * w)
+                return "\n".join(L)
             L.append(f"   failures vs run order: rho={dr['spearman_rho']:+.2f} "
                      f"(p={dr['p_value']:.3f}, {dr['n_runs']} runs)")
             if dr["drift_detected"] and not dr["interleaved"]:
@@ -376,11 +447,25 @@ class ComparisonResult:
              f" target budget: {self.budget} simulations per arm per seed", ""]
         L.append(f" {'arm':<28}{'evals':>7}{'fails':>7}{'P(fail)':>12}"
                  f"{'+/-':>9}{'worst':>9}")
+        unusable: list = []
         for lab in self.arm_labels:
             s = self.per_arm[lab]
-            L.append(f" {lab:<28}{s['mean_evaluations']:>7.0f}{s['mean_failures']:>7.1f}"
-                     f"{s['mean_p_fail']:>12.4g}{s['std_p_fail']:>9.2g}"
-                     f"{s['worst_margin']:>9.3f}")
+            # An unusable estimate gets no number: printing one invites it to
+            # be quoted, and that is exactly how it ended up in a report.
+            if s.get("p_fail_usable", True):
+                pf = f"{s['mean_p_fail']:>12.4g}{s['std_p_fail']:>9.2g}"
+            else:
+                pf = f"{'n/a':>12}{'':>9}"
+                unusable.append(lab)
+            L.append(f" {lab:<28}{s['mean_evaluations']:>7.0f}"
+                     f"{s['mean_failures']:>7.1f}{pf}{s['worst_margin']:>9.3f}")
+        if unusable:
+            L.append("")
+            L.append("   P(fail) reads n/a for: " + ", ".join(unusable))
+            L.append("   Their estimator has too few defensive draws at this")
+            L.append("   budget to BE a probability estimate (see per_seed.ess and")
+            L.append("   n_defensive). The failures and regions they found are")
+            L.append("   unaffected; read P(fail) off a plain_sampling arm.")
         if self.failed_runs:
             L.append("")
             L.append(" runs that errored out:")
@@ -389,6 +474,10 @@ class ComparisonResult:
         L.append("")
         L.append(self._paired_block())
         L.append("")
+        rk = self.ranking()
+        if rk is not None:
+            L.append(rk.report())
+            L.append("")
         L.append(self.regions.report())
         L.append("")
         L.append(" reading this: two arms with a similar P(fail) but a low Jaccard")
@@ -398,6 +487,7 @@ class ComparisonResult:
 
     def to_dict(self) -> dict:
         return {
+            "metadata": dict(self.metadata),
             "seeds": list(self.seeds),
             "budget": self.budget,
             "param_names": list(self.param_names),
@@ -406,6 +496,8 @@ class ComparisonResult:
             "per_seed": self.per_seed,
             "paired_test": self.paired_test(),
             "drift_diagnostic": self.drift_diagnostic(),
+            "ranking": (self.ranking().to_dict()
+                        if self.ranking() is not None else None),
             "failed_runs": [{"arm": a, "seed": s, "error": e}
                             for a, s, e in self.failed_runs],
             "regions": self.regions.to_dict(),
@@ -432,6 +524,12 @@ class ComparisonResult:
         for i, (label, (th, mg)) in enumerate(self.clouds.items()):
             payload[f"theta_{i}"] = np.asarray(th, float)
             payload[f"margins_{i}"] = np.asarray(mg, float)
+            # Which seed produced each point. Campaigns saved before this field
+            # existed cannot be split back into runs; readers must treat a
+            # missing seeds_<i> as "pooled only" rather than guessing.
+            sd = self.cloud_seeds.get(label)
+            if sd is not None and len(sd) == len(mg):
+                payload[f"seeds_{i}"] = np.asarray(sd, int)
         payload["labels"] = np.array(list(self.clouds.keys()), dtype=object)
         payload["param_names"] = np.array(self.param_names, dtype=object)
         np.savez_compressed(rf_raw, **payload)
@@ -554,6 +652,20 @@ class ModelComparison:
         ce_kw = dict(samples_per_iter=spi, max_iter=ce_max_iter,
                      final_samples=final, lower=param_lower, upper=param_upper,
                      verbose=verbose)
+        # The CE arms will warn on construction when this split leaves too few
+        # defensive draws; say what the split IS here, so the budget that caused
+        # it is visible next to the number that has to change.
+        from pipeline.rare_event import (MIN_DEFENSIVE_SAMPLES,
+                                         defensive_sample_count)
+        n_def = defensive_sample_count(final, 0.2)
+        if n_def < MIN_DEFENSIVE_SAMPLES and verbose:
+            need = int(np.ceil(MIN_DEFENSIVE_SAMPLES / 0.2)) + spi * ce_max_iter
+            print(f"[budget] cross_entropy: samples_per_iter={spi}, "
+                  f"final_samples={final} -> only {n_def} defensive draws. "
+                  f"p_fail from the CE arms is NOT usable below "
+                  f"{MIN_DEFENSIVE_SAMPLES}; a budget of ~{need} would fix it. "
+                  f"The failures and regions the arms find stay valid.",
+                  flush=True)
 
         arms = [
             LHSActiveBoundary(scenario, **ab_kw),
@@ -587,6 +699,7 @@ class ModelComparison:
                  if hasattr(self.scenario, "param_distributions") else None)
 
         clouds: dict = {}
+        cloud_seeds: dict = {}
         per_seed: dict = {}
         failed: list = []
 
@@ -623,12 +736,21 @@ class ModelComparison:
             th = np.asarray(res.theta_evaluated, float)
             mg = np.asarray(res.margins, float)
             fails = int((mg[np.isfinite(mg)] < thr).sum())
-            collected.setdefault(label, {"theta": [], "margins": [], "rows": []})
+            collected.setdefault(label, {"theta": [], "margins": [],
+                                         "seeds": [], "rows": []})
             collected[label]["theta"].append(th)
             collected[label]["margins"].append(mg)
+            collected[label]["seeds"].append(np.full(len(mg), int(sd), dtype=int))
             collected[label]["rows"].append({
                 "seed": int(sd),
                 "p_fail": float(res.p_fail),
+                # Is p_fail a probability estimate at all? Arms whose estimator
+                # degenerates at this budget (see rare_event.MIN_DEFENSIVE_SAMPLES)
+                # still report a number; it just must never be read as one.
+                "p_fail_usable": bool(getattr(res, "p_fail_usable", True)),
+                "n_defensive": int(getattr(res, "n_defensive", 0)),
+                "ess": float(getattr(res, "ess", float("nan"))),
+                "n_fail_effective": int(getattr(res, "n_fail_effective", 0)),
                 "n_evaluations": int(res.n_evaluations),
                 "n_failures": fails,
                 "worst_margin": float(np.nanmin(mg)) if mg.size else float("nan"),
@@ -650,6 +772,7 @@ class ModelComparison:
             if not c or not c["theta"]:
                 continue
             clouds[label] = (np.vstack(c["theta"]), np.concatenate(c["margins"]))
+            cloud_seeds[label] = np.concatenate(c["seeds"])
             per_seed[label] = sorted(c["rows"], key=lambda r: r["seed"])
 
         if not clouds:
@@ -677,6 +800,10 @@ class ModelComparison:
                 "worst_margin": float(np.nanmin(wm)) if wm.size else float("nan"),
                 "n_regions": len(regions.discovery.get(label, ())),
                 "n_exclusive_regions": len(regions.exclusive_regions(label)),
+                # False as soon as ONE seed produced a degenerate estimate: a
+                # mean over usable and unusable estimates is not usable either.
+                "p_fail_usable": bool(all(r.get("p_fail_usable", True)
+                                          for r in rows)),
             }
 
         return ComparisonResult(
@@ -689,4 +816,9 @@ class ModelComparison:
             budget=self.budget,
             param_names=names,
             failed_runs=failed,
+            cloud_seeds=cloud_seeds,
+            param_lower=lower,
+            param_upper=upper,
+            odd_dists=dists,
+            threshold=thr,
         )

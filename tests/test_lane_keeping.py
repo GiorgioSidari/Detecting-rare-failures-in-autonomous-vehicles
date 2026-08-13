@@ -1,13 +1,13 @@
 """
-Script di test diagnostico per LaneKeepingScenario.
+Diagnostic test script for LaneKeepingScenario.
 
-Esegue due simulazioni (rettilineo e zigzag) e stampa nel dettaglio:
-  - parametri inviati al Docker
-  - statistiche della traiettoria (XTE, sterzo, velocità)
-  - le tre componenti della QoI composita (M1, M2, M3)
-  - verdetto finale
+Runs two simulations (straight and zigzag) and prints in detail:
+  - the parameters sent to Docker
+  - trajectory statistics (XTE, steering, speed)
+  - the three components of the composite QoI (M1, M2, M3)
+  - a final verdict
 
-Uso:
+Usage:
     cd /path/to/Detecting-rare-failures-in-autonomous-vehicles
     python3 tests/test_lane_keeping.py
 """
@@ -81,15 +81,15 @@ def run_and_report(sc, label, params, param_names):
     # Traiettoria
     print(f"\nTraiettoria:")
     print(f"  Step totali (run reale):  {run_len}")
-    print(f"  Step terminati in anticipo: {'Sì — XTE > limite' if run_len < T_max else 'No — run completo'}")
+    print(f"  Step terminati in anticipo: {'Sì — XTE > limit' if run_len < T_max else 'No — run completo'}")
     print(f"  Distanza percorsa:  X {x[0]:.1f}m → {x[-1]:.1f}m  (Δ {x[-1]-x[0]:.1f}m)")
     print(f"  Deriva laterale:    Y {y[0]:.4f}m → {y[-1]:.4f}m")
 
     # XTE
     print(f"\nCross-Track Error (XTE) — distanza dal centro corsia:")
-    print(f"  Max |XTE|:   {np.abs(xte).max():.4f}m   (limite = {MAX_XTE}m)")
+    print(f"  Max |XTE|:   {np.abs(xte).max():.4f}m   (limit = {MAX_XTE}m)")
     print(f"  Media |XTE|: {np.abs(xte).mean():.4f}m")
-    print(f"  Soglia M3:   {EARLY_FRAC * MAX_XTE:.4f}m  ({EARLY_FRAC*100:.0f}% del limite)")
+    print(f"  Soglia M3:   {EARLY_FRAC * MAX_XTE:.4f}m  ({EARLY_FRAC*100:.0f}% del limit)")
     near_steps = (np.abs(xte) > EARLY_FRAC * MAX_XTE).sum()
     print(f"  Step vicino al bordo: {near_steps} / {run_len}  ({near_steps/run_len*100:.1f}%)")
 
@@ -104,14 +104,14 @@ def run_and_report(sc, label, params, param_names):
     # QoI
     m1, m2, m3, qoi = compute_qoi_components(sc, traj, params)
     print(f"\nQoI composita:")
-    print(f"  M1 (peso 0.6) — margine XTE:        {m1[0]:+.4f}   (MAX_XTE - max|XTE|)")
-    print(f"  M2 (peso 0.2) — peak dev sterzo:     {m2[0]:+.4f}   (-(max|s|-mean|s|)/STEER_RANGE_NORM)")
-    print(f"  M3 (peso 0.2) — avvicinamento bordo:{m3[0]:+.4f}   (0=mai; -1=subito)")
+    print(f"  M1 (weight 0.6) -- XTE margin:      {m1[0]:+.4f}   (MAX_XTE - max|XTE|)")
+    print(f"  M2 (weight 0.2) -- steering peak:   {m2[0]:+.4f}   (-(max|s|-mean|s|)/STEER_RANGE_NORM)")
+    print(f"  M3 (weight 0.2) -- edge approach:   {m3[0]:+.4f}   (0=never; -1=at once)")
     print(f"  {SEP}")
     print(f"  QoI finale:  {qoi[0]:+.4f}")
 
-    verdict = "✓ SAFE  (QoI > 0)" if qoi[0] > 0 else "✗ FAILURE  (QoI < 0)"
-    print(f"\n  Verdetto: {verdict}")
+    verdict = "SAFE  (QoI > 0)" if qoi[0] > 0 else "FAILURE  (QoI < 0)"
+    print(f"\n  Verdict: {verdict}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -121,10 +121,10 @@ if __name__ == "__main__":
     bounds = sc.param_bounds()
     names  = bounds["names"]
 
-    # Test 1 — rettilineo lento: tutti angoli = 0°
+    # Test 1 -- slow straight: every angle = 0 deg
     run_and_report(
         sc,
-        label  = "TEST 1 — Rettilineo (tutti angoli = 0°)",
+        label  = "TEST 1 -- Straight (all angles = 0 deg)",
         params = np.array([[0, 0, 0, 0, 0, 10.0, 15.0, 25.0, 250.0]]),
         param_names = names,
     )

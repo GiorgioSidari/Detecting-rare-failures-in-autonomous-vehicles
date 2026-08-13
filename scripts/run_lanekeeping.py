@@ -32,34 +32,34 @@ REALISTIC_UPPER = [45, 45, 45, 45, 45,  8.0, 14.0, 40.0, 350.0]
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run the lane_keeping pipeline with a clear report.")
-    ap.add_argument("--n", type=int, default=20, help="numero di campioni LHS (default 20)")
+    ap.add_argument("--n", type=int, default=20, help="number of LHS samples (default 20)")
     ap.add_argument("--workers", type=int, default=None,
-                    help="numero di container/worker paralleli (default: NUM_WORKERS env o 4)")
+                    help="number of parallel containers/workers (default: NUM_WORKERS env or 4)")
     ap.add_argument("--seed", type=int, default=42, help="seed (default 42)")
-    ap.add_argument("--scenario", default="lane_keeping", help="nome scenario (default lane_keeping)")
+    ap.add_argument("--scenario", default="lane_keeping", help="name scenario (default lane_keeping)")
     ap.add_argument("--preset", choices=["full", "realistic"], default="full",
                     help="'full' = spazio esteso completo (ODD ampio); "
-                         "'realistic' = ODD realistico proposto (angoli/velocita' plausibili)")
+                         "'realistic' = the proposed realistic ODD (plausible angles/speeds)")
     ap.add_argument("--rare-fraction", type=float, default=0.05,
-                    help="frazione bottom-k trattata come 'rara' (default 0.05)")
-    ap.add_argument("--quiet", action="store_true", help="non mostrare il progresso per-simulazione")
+                    help="bottom-k fraction treated as 'rare' (default 0.05)")
+    ap.add_argument("--quiet", action="store_true", help="do not show per-simulation progress")
     ap.add_argument("--trace-worst", action="store_true",
-                    help="stampa la traccia passo-passo (x, XTE, sterzo) del run peggiore")
+                    help="print the step-by-step trace (x, XTE, steering) of the worst run")
     ap.add_argument("--max-speed", type=float, default=None,
-                    help="forza il limite superiore di max_speed (m/s) su qualsiasi preset")
+                    help="force the upper bound of max_speed (m/s) on any preset")
     ap.add_argument("--max-angle", type=float, default=None,
-                    help="forza il limite superiore degli angoli (gradi) su qualsiasi preset")
+                    help="force the upper bound of the angles (degrees) on any preset")
     ap.add_argument("--min-speed", type=float, default=None,
-                    help="forza il limite superiore di min_speed (m/s): utile con --max-speed "
-                         "basso per evitare bande min/max sovrapposte (campioni min>max)")
+                    help="force the upper bound of min_speed (m/s): useful with a low "
+                         "--max-speed to avoid overlapping min/max bands (min>max samples)")
     ap.add_argument("--max-seg", type=float, default=None,
-                    help="forza il limite superiore di segment_length (m): e' la leva che "
-                         "sposta di piu' il tasso di fallimento (vedi RESULTS.md)")
+                    help="force the upper bound of segment_length (m): the lever that moves "
+                         "the failure rate the most")
     ap.add_argument("--min-seg", type=float, default=None,
-                    help="alza il limite inferiore di segment_length (m)")
+                    help="raise the lower bound of segment_length (m)")
     ap.add_argument("--sampling", choices=["uniform", "realistic"], default="realistic",
-                    help="'realistic' = campiona dalla distribuzione operativa (ppf): la "
-                         "frazione di fallimenti stima P(fallimento) sull'ODD; "
+                    help="'realistic' = sample from the operational distribution (ppf): the "
+                         "failure fraction estimates P(failure) under the ODD; "
                          "'uniform' = LHS uniforme sui bound (baseline)")
     args = ap.parse_args()
 
@@ -132,7 +132,7 @@ def main() -> None:
     print(f" Worker pool     : {n_workers}  (NUM_WORKERS={n_workers})")
     print(sub)
     if not args.quiet:
-        print(" Progresso simulazioni (una riga per run completato):")
+        print(" Simulation progress (one line per completed run):")
 
     t0 = time.time()
     r = run(args.scenario, n_samples=args.n, seed=args.seed,
@@ -156,7 +156,7 @@ def main() -> None:
     print(sub)
     print(" RISULTATI")
     print(sub)
-    print(f" Tempo totale        : {dt:6.1f}s   (~{dt/max(N,1):.1f}s per campione)")
+    print(f" Total time          : {dt:6.1f}s   (~{dt/max(N,1):.1f}s per sample)")
     n_lowfid = int(getattr(r, "n_low_fidelity", 0))
     inv_note = ""
     if n_invalid:
@@ -164,9 +164,9 @@ def main() -> None:
         if n_deg:
             parts.append(f"{n_deg} abortiti")
         if n_lowfid:
-            parts.append(f"{n_lowfid} sotto-campionati")
+            parts.append(f"{n_lowfid} under-sampled")
         detail = (": " + ", ".join(parts)) if parts else ""
-        inv_note = f"   ({n_invalid} non validi esclusi{detail})"
+        inv_note = f"   ({n_invalid} invalid, excluded{detail})"
     print(f" Scenari validi      : {n_valid}/{N}{inv_note}")
     if n_valid == 0:
         print(" Nessuno scenario valido: impossibile calcolare i tassi.")
@@ -180,11 +180,11 @@ def main() -> None:
                else "ODD uniforme")
     ci_txt = (f"  CI95% [{ci[0]*100:.1f}, {ci[1]*100:.1f}]%"
               if ci is not None else "")
-    print(f" P(fallimento)       : {p_fail*100:5.1f}%   [{odd_lbl}]"
+    print(f" P(failure)          : {p_fail*100:5.1f}%   [{odd_lbl}]"
           f"   ({n_fail}/{n_valid} falliti){ci_txt}")
     # Severity axis (worst-case).
     print(f" Worst-case (severita'): bottom-{args.rare_fraction*100:.0f}% = {n_rare}/{n_valid} scenari"
-          f"   | margine: min {mv.min():+.3f} | mediana {np.median(mv):+.3f} | max {mv.max():+.3f}")
+          f"   | margin: min {mv.min():+.3f} | mediana {np.median(mv):+.3f} | max {mv.max():+.3f}")
     print(f" Modi POD             : {r.pod_n_modes}")
     print(sub)
 
@@ -215,23 +215,23 @@ def main() -> None:
                     quota = (wm_med / tot * 100.0) if tot > 0 else float("nan")
                     print(f"   Tempo/step (mediana): inferenza {im_med:6.1f} ms | "
                           f"attesa Unity {wm_med:6.1f} ms  "
-                          f"(attesa = {quota:4.1f}% del passo)")
+                          f"(expected = {quota:4.1f}% of the step)")
                     dominante = "Unity/I-O" if wm_med >= im_med else "inferenza/CPU"
                     print(f"   -> collo di bottiglia: {dominante}")
 
             n_lowfid = int(getattr(r, "n_low_fidelity", 0))
             if n_lowfid:
                 print(f"   Esclusi per bassa fedelta': {n_lowfid} "
-                      f"(sotto-campionati: non contano come fallimenti)")
+                      f"(under-sampled: they do not count as failures)")
             else:
                 print("   Gate fedelta' OFF (LK_MIN_CONTROL_HZ/LK_MAX_METERS_PER_STEP=0): "
-                      "solo misura, nessuna esclusione")
+                      "measurement only, no exclusion")
             print(sub)
 
-    print(" Margini ordinati (peggiore -> migliore, solo scenari validi):")
+    print(" Sorted margins (worst -> best, valid scenarios only):")
     vals = ", ".join(f"{m[i]:+.2f}" for i in order)
     print(f"   [{vals}]")
-    print("   (valori < 0 = fallimento; piu' negativo = peggiore)")
+    print("   (values < 0 = failure; more negative = worse)")
     print(sub)
 
     # Per-run survival (non-zero timesteps), if available.
@@ -252,9 +252,9 @@ def main() -> None:
     rare = list(r.rare_failure_idx)
     if rare:
         if len(rare) == 1:
-            print(" SCENARIO RARO (il piu' critico):")
+            print(" RARE SCENARIO (the most critical):")
         else:
-            print(f" SCENARI RARI (i {len(rare)} piu' critici):")
+            print(f" RARE SCENARIOS (the {len(rare)} most critical):")
         rows = list(rare)
     else:
         print(" Nessun rare failure isolato. I 5 scenari peggiori:")
@@ -278,22 +278,22 @@ def main() -> None:
         corr = float(np.mean(np.sign(steer[mask]) * np.sign(xte[mask]))) if mask.any() else 0.0
         both = (xmin < -1.0) and (xmax > 1.0)
         if both:
-            mode = (f"oscillazione instabile: prima deriva (XTE {xmin:+.1f} m), poi lo sterzo "
+            mode = (f"unstable oscillation: first drifts (XTE {xmin:+.1f} m), then the steering "
                     f"{'satura e ' if steer_max >= 0.9 else ''}sovra-corregge fino a {xmax:+.1f} m "
                     f"dal lato opposto")
         elif corr > 0.15:
-            mode = f"sterza nel verso sbagliato (asseconda la deriva) fino a XTE {peak:+.1f} m"
+            mode = f"steers the wrong way (goes along with the drift) up to XTE {peak:+.1f} m"
         else:
-            quando = "tardi" if Li > 10 else "subito"
-            mode = (f"deriva non corretta ({quando}): sterza contro l'errore ma non basta, "
+            when_ = "late" if Li > 10 else "at once"
+            mode = (f"uncorrected drift ({when_}): steers against the error but not enough, "
                     f"XTE fino a {peak:+.1f} m")
         row = np.asarray(r.params[i], dtype=float)
         ctx = ""
         if len(row) >= 9:
-            ctx = (f"; contesto: curva max {int(max(row[:5]))}°, "
-                   f"velocita' {int(round(row[5]))}-{int(round(row[6]))} m/s")
+            ctx = (f"; contesto: curve max {int(max(row[:5]))}°, "
+                   f"speed {int(round(row[5]))}-{int(round(row[6]))} m/s")
         side = "XTE+ (positivo)" if peak > 0 else "XTE- (negativo)"
-        return f"esce dal lato {side} dopo {Li} step -- {mode}{ctx}"
+        return f"leaves on the {side} side after {Li} steps -- {mode}{ctx}"
 
     print(" PERCHE' SONO FALLITI (lettura dai dati):")
     for i in rows:
@@ -309,15 +309,15 @@ def main() -> None:
         print("   step |    x      |   XTE     | sterzo")
         for t in range(L):
             print(f"   {t:4d} | {wtraj[t,0]:9.3f} | {wtraj[t,2]:+9.3f} | {wtraj[t,3]:+7.3f}")
-        print("   (XTE monotona in una direzione = deriva costante; oscilla crescendo = controllo instabile; parte gia alta = spawn/geometria)")
+        print("   (XTE monotone in one direction = constant drift; growing oscillation = unstable control; already high at the start = spawn/geometry)")
         print(sub)
 
     # Summary reading.
     fr = r.failure_rate
     if fr >= 0.8:
-        hint = ("Tasso di fallimento molto alto: i fallimenti NON sono rari. "
-                "Valuta un ODD piu' realistico (--preset realistic) o rivedi la "
-                "soglia QoI; alto anche cosi' = modello intrinsecamente fragile.")
+        hint = ("Very high failure rate: the failures are NOT rare. Consider a "
+                "more realistic ODD (--preset realistic) or revisit the QoI "
+                "threshold; still high = intrinsically fragile model.")
     elif fr <= 0.2:
         hint = "Tasso basso: buon regime per isolare rare failure significativi."
     else:

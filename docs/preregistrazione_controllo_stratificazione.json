@@ -1,0 +1,63 @@
+{
+  "titolo": "La stratificazione LHS contribuisce qualcosa quando il modello e spento? Chiusura del disegno 2x2",
+  "scritto_il": "2026-08-29",
+  "scritto_prima_dei_dati": true,
+  "stato": "ESPLORATIVO. Questo documento e scritto prima della campagna cmp_md12_ctrl_rand, ma DOPO aver visto l'esito di H1 e H2 su cmp_md12_ctrl. Le ipotesi qui sotto non sono cieche rispetto alla direzione dell'effetto sul disegno lhs. Vanno riportate come controllo di robustezza, non come test confermativo primario.",
+  "campagna": "results/cmp_md12_ctrl_rand  (MetaDrive, 3 bracci, 12 seed, budget 120)",
+  "alpha": 0.05,
+  "metric": "rare_per_100",
+  "odd": "default di scenario, identico a cmp_md12 e cmp_md12_ctrl",
+  "punto_operativo": "speed_scale = 0.3625, identico a cmp_md12",
+  "test": "Wilcoxon signed-rank appaiato per seed, correzione di Holm sulle 3 coppie",
+  "regola_di_arresto": "12 seed, gli stessi di cmp_md12, decisi in anticipo. Nessuna analisi intermedia, nessun seed aggiunto dopo aver visto i dati.",
+
+  "problema": "cmp_md12_ctrl ha decomposto il vantaggio di active_boundary sul disegno lhs: 41.59 -> 10.19 spegnendo l'acquisizione, 10.19 -> 1.43 passando dal box alle marginali ODD, quota_apprendimento = 0.78. Ma in TUTTI e tre quei bracci il campionamento resta stratificato: sia il design iniziale da 40 punti sia ogni pool da 4000 candidati sono estratti per Latin Hypercube. Il braccio di controllo non era quindi una ricerca completamente casuale sul dominio: era una ricerca casuale su un insieme di punti a cui era gia imposto di non addensarsi su nessun asse. Manca la cella in cui non c'e ne apprendimento ne stratificazione.",
+
+  "controllo": "active_boundary[random+randacq] e Monte Carlo uniforme puro sul box: design iniziale uniforme, pool uniforme, batch pescato a caso dal pool. Nessuna struttura, ne appresa ne imposta. E il pavimento vero della colonna 'dove si campiona'.",
+
+  "disegno_2x2": {
+    "descrizione": "acquisizione (entropy | random) x disegno di campionamento (lhs | random), metrica rare_per_100",
+    "lhs_entropy": 41.59,
+    "lhs_randacq": 10.19,
+    "random_entropy": 41.89,
+    "random_randacq": null,
+    "riferimenti_ODD": {"plain_lhs": 1.43, "plain_random": 1.0}
+  },
+
+  "hypotheses": [
+    {
+      "id": "H3",
+      "a": "active_boundary[random]",
+      "b": "active_boundary[random+randacq]",
+      "direction": "a>b",
+      "rationale": "replica di H1 sul disegno random. Se rigetta, il contributo dell'acquisizione per entropia non dipende dal disegno iniziale."
+    },
+    {
+      "id": "H4",
+      "a": "active_boundary[lhs+randacq]",
+      "b": "active_boundary[random+randacq]",
+      "direction": "bidirezionale, nessuna direzione dichiarata",
+      "rationale": "E la domanda vera di questa campagna: a modello spento, la stratificazione LHS da sola sposta il numero di fallimenti rari? Non e dichiarata una direzione perche non ce n'e una difendibile a priori (vedi previsione_meccanicistica)."
+    },
+    {
+      "id": "H5b",
+      "a": "active_boundary[random+randacq]",
+      "b": "plain_sampling[random]",
+      "direction": "a>b",
+      "rationale": "replica di H2 sul disegno random. Isola l'effetto box-contro-ODD nella forma piu pulita possibile: due Monte Carlo uniformi puri, senza apprendimento e senza stratificazione da nessuna delle due parti. L'unica differenza rimasta e la distribuzione da cui si estrae."
+    }
+  ],
+
+  "previsione_meccanicistica": "Attesa: H4 NON rigetta, cioe lhs+randacq e random+randacq danno medie vicine. Motivo: rare e definito dalla log-densita ODD del punto, che e una somma di log-marginali per asse; LHS e uniforme sul box hanno le stesse marginali su ogni asse, LHS le riproduce solo con meno errore campionario. La stratificazione cambia la disposizione congiunta dei punti, non la frequenza con cui cadono sotto il taglio di rarita. Previsione secondaria, piu informativa della prima: la DISPERSIONE fra seed di rare_per_100 dovrebbe essere piu piccola per lhs+randacq che per random+randacq, perche LHS aggancia le marginali con meno varianza. Va riportata la deviazione standard fra i 12 seed di entrambi i bracci anche se H4 non rigetta.",
+
+  "esiti_dichiarati_in_anticipo": {
+    "H4 non rigetta": "esito atteso. La stratificazione non contribuisce alla scoperta di fallimenti rari: tutto il 10.19 del braccio di controllo e effetto della regione di campionamento (uniforme sul box invece che dall'ODD), non della struttura del disegno. Rafforza la lettura di cmp_md12_ctrl: la decomposizione 78% apprendimento / 22% regione e completa, non c'e un terzo contributo nascosto.",
+    "H4 rigetta a favore di lhs": "la stratificazione stava facendo un lavoro reale, e una parte di quel che cmp_md12_ctrl attribuisce alla 'regione di campionamento' e in realta 'disegno stratificato'. In quel caso la decomposizione diventa a tre termini e va riscritta.",
+    "H4 rigetta a favore di random": "esito sorprendente, prior bassa. Suggerirebbe che imporre la dispersione impedisce al pool di addensarsi dove serve. Da riportare con cautela e da non interpretare senza replica.",
+    "H3 non rigetta": "contraddirebbe H1, che ha rigettato 12/12 con p Holm = 0.001 sul disegno lhs. Prima di interpretarlo vanno verificate le ancore di sessione."
+  },
+
+  "ancore_di_sessione": "active_boundary[random] e plain_sampling[random] girano in questa campagna proprio come verifica: devono riprodurre rispettivamente 41.89 e 1.00 rari/100 di cmp_md12. In cmp_md12_ctrl le due ancore (active_boundary[lhs] e plain_sampling[lhs]) hanno riprodotto i valori di cmp_md12 cifra per cifra, incluse P(fail) = 0.0239077375660242 e worst = -0.9643333: lo stesso livello di accordo e atteso qui. Se divergono, i confronti fra campagne non sono validi e va indagata la deriva prima di interpretare H3, H4 e H5b.",
+
+  "avvertenza_regioni": "I conteggi di regioni e regioni esclusive NON sono confrontabili fra campagne: DBSCAN gira sull'insieme dei fallimenti dei soli bracci presenti nella corsa e eps e stimato dai dati, quindi lo stesso braccio produce conteggi diversi in campagne diverse (active_boundary[lhs]: 494 regioni in cmp_md12, 285 in cmp_md12_ctrl). Solo rare_per_100 e per-braccio e confrontabile."
+}

@@ -155,7 +155,7 @@ def test_all_workers_stuck_raises_a_useful_error(monkeypatch, fast_timeouts):
     monkeypatch.setattr(lk, "requests", FakeSimulatorPool(stuck_urls=urls))
 
     sc = lk.LaneKeepingScenario(simulator_urls=urls)
-    with pytest.raises(RuntimeError, match="Nessuna delle"):
+    with pytest.raises(RuntimeError, match="None of the"):
         sc.run_simulation(_params(4))
 
 

@@ -1,0 +1,57 @@
+{
+  "titolo": "Quale algoritmo di ricerca produce piu fallimenti rari, a budget uguale",
+  "scritto_il": "2026-08-26",
+  "scritto_prima_dei_dati": true,
+  "campagna": "results/cmp_md12  (MetaDrive, 6 bracci, 12 seed, budget 120)",
+  "alpha": 0.05,
+  "metric": "rare_per_100",
+  "definizione_rarita": "fallimento il cui punto ha log-densita ODD sotto il decile inferiore (rarity_q = 0.10), calibrato su 200000 estrazioni da f",
+  "odd": "default di scenario (angoli [0,85], min_speed [5,15], max_speed [10,30], segment [10,40], map [150,350])",
+  "test": "Wilcoxon signed-rank appaiato per seed, unilaterale dove la direzione e dichiarata",
+  "procedura": "sequenza fissa: ogni ipotesi al pieno alpha, si ferma alla prima che fallisce; nessuna correzione per molteplicita, e nessuna ipotesi oltre il punto di arresto va riportata come risultato nullo",
+  "regola_di_arresto": "12 seed, decisi in anticipo. Nessuna analisi intermedia, nessun seed aggiunto dopo aver visto i dati.",
+  "hypotheses": [
+    {
+      "id": "H1",
+      "a": "active_boundary[lhs]",
+      "b": "plain_sampling[lhs]",
+      "direction": "a>b",
+      "rationale": "il confronto che giustifica l'esistenza del metodo: se la ricerca attiva non batte il campionamento cieco a budget uguale non sta guadagnando la sua complessita. Atteso vincente: 43.6 contro 1.4 rari/100 a 3 seed."
+    },
+    {
+      "id": "H2",
+      "a": "active_boundary[lhs]",
+      "b": "cross_entropy[lhs]",
+      "direction": "a>b",
+      "rationale": "il confronto fra famiglie che nessuna analisi precedente calcolava. Atteso vincente: 43.6 contro 11.4 a 3 seed."
+    },
+    {
+      "id": "H3",
+      "a": "active_boundary[random]",
+      "b": "cross_entropy[random]",
+      "direction": "a>b",
+      "rationale": "replica di H2 sull'altro disegno campionario: se vale solo per il braccio LHS non e una proprieta della famiglia."
+    },
+    {
+      "id": "H4",
+      "a": "cross_entropy[lhs]",
+      "b": "plain_sampling[lhs]",
+      "direction": "two-sided",
+      "rationale": "bilaterale perche i due backend disaccordano: su MetaDrive la CE sembra battere il campionamento cieco (11.4 contro 1.4), su Udacity ne perde (0.31 contro 1.16). Nessuna direzione e difendibile in anticipo."
+    },
+    {
+      "id": "H5",
+      "a": "active_boundary[lhs]",
+      "b": "active_boundary[random]",
+      "direction": "two-sided",
+      "rationale": "la domanda originale LHS contro random, messa per ultima proprio perche e quella che ci si aspetta finisca in pareggio: in una sequenza fissa un'ipotesi attesa come nulla blocca tutto cio che le sta dietro."
+    }
+  ],
+  "esiti_dichiarati_in_anticipo": {
+    "H1 e H2 rigettano": "l'affermazione principale della tesi e dimostrata: active boundary produce piu fallimenti rari del campionamento cieco e della cross-entropy, a budget uguale, con un test appaiato pre-registrato.",
+    "H2 non rigetta": "la classifica resta descrittiva fra famiglie; H1 da solo resta un risultato valido e va riportato come tale.",
+    "H4 rigetta a favore di plain_sampling": "risultato negativo su MetaDrive, che replica quello gia osservato su Udacity: la cross-entropy trova meno fallimenti rari del campionamento cieco. Va riportato, non nascosto.",
+    "H5 rigetta": "sarebbe il primo segnale in tutto il lavoro che LHS e random non sono equivalenti; da replicare prima di crederci."
+  },
+  "analisi_secondaria_esplorativa": "la matrice a 15 coppie con correzione di Holm viene comunque stampata da rank_arms.py, ed e ESPLORATIVA: a 12 seed il pavimento del p e 0.00049 e la soglia di Holm 0.0033, quindi puo raggiungere significativita, ma non fa parte del piano pre-registrato e va etichettata cosi."
+}
