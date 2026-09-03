@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-Cross-Entropy rare-event runner (M4) on the real simulator (Docker).
+Cross-Entropy rare-event runner on the Udacity backend.
 
-Estimates P(failure) under the operational distribution with the Cross-Entropy method: samples
-adaptively toward the failure region instead of relying on blind sampling. Useful when failures
-are rare (where plain Monte Carlo is inefficient).
+Estimates P(failure) under the operational distribution with the Cross-Entropy
+method of `pipeline.rare_event`: the sampling distribution is fitted iteratively
+toward the failure region, and the final estimate is an importance-sampling
+average over a last batch drawn from it.
 
-Prerequisites: as for run_lanekeeping.py, the simulator containers must be running.
+Prerequisites: as for run_lanekeeping.py, the simulator containers must be
+running.
 
 Usage:
     python scripts/run_rare_event.py
     python scripts/run_rare_event.py --preset full --spi 60 --final 300
     python scripts/run_rare_event.py --workers 4 --seed 1 --quiet
 
-Budget: each iteration runs `--spi` simulations plus `--final` at the end. At ~10 s/run a budget
-of ~500-800 runs takes roughly 1-2 hours. Start small.
+Budget: each iteration runs `--spi` simulations, plus `--final` at the end.
 
-ODD note: on the 'realistic' preset, at correct control rate, failures are ~absent, so CE would
-estimate P~0 (a valid result: "no failures in this ODD"). To see CE work you need an ODD where
-failures exist but are rare: the 'full' preset (angles up to 85, speed up to 30) is the default.
+The ODD preset selects the distribution the probability refers to. The default
+is `full` (angles up to 85 deg, speed up to 30 m/s); on the `realistic` preset
+failures are close to absent, and the estimate returned is correspondingly near
+zero.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ REALISTIC_LOWER = [0,  0,  0,  0,  0,   5.0,  9.0, 20.0, 200.0]
 REALISTIC_UPPER = [45, 45, 45, 45, 45,  8.0, 14.0, 40.0, 350.0]
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Cross-Entropy (M4) on the lane_keeping simulator.")
     ap.add_argument("--scenario", default="lane_keeping")
     ap.add_argument("--preset", choices=["full", "realistic"], default="full",
@@ -61,6 +63,11 @@ def main() -> None:
     ap.add_argument("--alpha", type=float, default=0.2, help="mixture fraction from f (default 0.2)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--quiet", action="store_true", help="do not show the per-iteration gamma descent")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.workers is not None:

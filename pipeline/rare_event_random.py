@@ -1,43 +1,33 @@
 """
-Cross-Entropy rare-event estimation with a pluggable sampling design.
+Cross-entropy rare-event estimation with a pluggable sampling design.
 
-This is the class form of
-:func:`pipeline.rare_event.estimate_failure_probability`. The algorithm is
-unchanged — lower gamma toward the failure threshold, refit the proposal on the
-elite with f/q weights, finish with defensive-mixture importance sampling and a
-bootstrap CI — but every draw goes through a
+Class form of :func:`pipeline.rare_event.estimate_failure_probability`: the
+proposal is walked toward the failure region by refitting it on the elite
+fraction of each batch with f/q weights, and the final probability is estimated
+by importance sampling under the defensive mixture ``alpha*f + (1-alpha)*q``,
+with a bootstrap confidence interval. Every draw goes through a
 :class:`~pipeline.samplers.BaseSampler`.
 
-A note on what "LHS vs random" means here
------------------------------------------
-Unlike ``active_boundary``, the existing ``rare_event`` module never used a
-Latin Hypercube: :func:`pipeline.rare_event._sample_product` calls ``rvs`` on
-each marginal, i.e. it is already i.i.d. random sampling. So the meaningful
-comparison for Cross-Entropy is the mirror image of the active-boundary one:
+The two designs differ in how each batch is drawn from the current proposal:
 
-  * ``sampler="random"``  reproduces the current behaviour exactly (the
-    inverse-CDF of a uniform draw is the same law as ``rvs``);
-  * ``sampler="lhs"``     stratifies each CE iteration by pushing a Latin
-    Hypercube through the proposal's inverse CDF.
+  * ``sampler="random"``  draws i.i.d., which is what
+    :func:`pipeline.rare_event.sample_product` does;
+  * ``sampler="lhs"``     pushes a Latin Hypercube through the proposal's
+    inverse CDF, so each batch covers every stratum of every axis once.
 
-That matters because CE is most fragile in its first iterations: gamma is set
-from the ``rho`` quantile of the sampled margins, and an unstratified batch that
-happens to miss the tail sets gamma too high, the elite set lands in the wrong
-place, and the proposal walks toward the wrong mode. Stratifying the draw makes
-the quantile estimate — and therefore the whole descent — markedly more stable
-at small ``samples_per_iter``, which is the regime the real simulator forces
-(~10 s per run).
+The draw feeds the gamma quantile that sets the elite set, so it affects where
+the descent goes, not only its variance.
 
 Usage
 -----
     from pipeline.rare_event_random import CrossEntropyRunner, RandomSearchCrossEntropy
 
-    res_rnd = RandomSearchCrossEntropy(scenario).run(seed=0)   # current behaviour
+    res_rnd = RandomSearchCrossEntropy(scenario).run(seed=0)
     res_lhs = CrossEntropyRunner(scenario, sampler="lhs").run(seed=0)
 
 Both return a :class:`SampledRareEventResult`, a
 :class:`~pipeline.rare_event.RareEventResult` extended with every evaluated
-point and margin so the failure-region comparison can work on the same data.
+point and margin.
 """
 from __future__ import annotations
 
@@ -48,9 +38,9 @@ import numpy as np
 from pipeline.rare_event import (
     MIN_DEFENSIVE_SAMPLES,
     RareEventResult,
-    _bootstrap_ci,
-    _build_q,
-    _logpdf_product,
+    bootstrap_ci,
+    build_proposal,
+    logpdf_product,
     check_defensive_budget,
     defensive_sample_count,
     effective_sample_size,
@@ -71,28 +61,6 @@ class SampledRareEventResult(RareEventResult):
 
 
 class CrossEntropyRunner:
-    """
-    Cross-Entropy + defensive-mixture importance sampling, sampler-parameterised.
-
-    Parameters
-    ----------
-    scenario : registry key (str), a BaseScenario-like object, or None when
-               ``margin_fn`` / ``f_dists`` / ``lower`` / ``upper`` are given
-               explicitly (the synthetic-validation path).
-    sampler  : "lhs" | "random" | BaseSampler.
-    samples_per_iter : simulations per CE iteration.
-    rho      : elite fraction (the margin quantile that sets gamma).
-    max_iter : cap on CE iterations.
-    final_samples : simulations spent on the final IS estimate.
-    alpha    : defensive-mixture fraction drawn from f; bounds the weights by 1/alpha.
-    scale_floor : minimum proposal scale as a fraction of the range (anti-collapse).
-    threshold : failure threshold; taken from the scenario when omitted.
-
-    The simulation budget is ``samples_per_iter * iterations + final_samples``;
-    since ``iterations`` is data-dependent (the descent can stop early), the
-    comparison harness reports the realised ``n_evaluations`` alongside the
-    result rather than assuming equal budgets.
-    """
 
     def __init__(
         self,
@@ -112,6 +80,28 @@ class CrossEntropyRunner:
         scale_floor: float = 0.03,
         verbose: bool = False,
     ):
+        """
+        Cross-Entropy + defensive-mixture importance sampling, sampler-parameterised.
+
+        Parameters
+        ----------
+        scenario : registry key (str), a BaseScenario-like object, or None when
+                   ``margin_fn`` / ``f_dists`` / ``lower`` / ``upper`` are given
+                   explicitly (the synthetic-validation path).
+        sampler  : "lhs" | "random" | BaseSampler.
+        samples_per_iter : simulations per CE iteration.
+        rho      : elite fraction (the margin quantile that sets gamma).
+        max_iter : cap on CE iterations.
+        final_samples : simulations spent on the final IS estimate.
+        alpha    : defensive-mixture fraction drawn from f; bounds the weights by 1/alpha.
+        scale_floor : minimum proposal scale as a fraction of the range (anti-collapse).
+        threshold : failure threshold; taken from the scenario when omitted.
+
+        The simulation budget is ``samples_per_iter * iterations + final_samples``;
+        since ``iterations`` is data-dependent (the descent can stop early), the
+        comparison harness reports the realised ``n_evaluations`` alongside the
+        result rather than assuming equal budgets.
+        """
         if isinstance(scenario, str):
             from scenarios import SCENARIOS
             scenario = SCENARIOS[scenario]
@@ -162,25 +152,25 @@ class CrossEntropyRunner:
     def label(self) -> str:
         return f"cross_entropy[{self.sampler.name}]"
 
-    def run(self, seed: int = 0) -> SampledRareEventResult:
-        """Execute the CE descent and the final IS estimate."""
-        rng = np.random.default_rng(seed)
-        lo, hi = self.lower, self.upper
-        d = len(lo)
-        thr = self.threshold
+    def _ce_descent(self, loc: np.ndarray, scale: np.ndarray,
+                    scale_min: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                    thr: float, seed: int,
+                    seen_X: list, seen_m: list, n_eval: int) -> tuple:
+        """
+        Walk the proposal distribution toward the failure region.
 
-        loc = np.array([float(fd.mean()) for fd in self.f_dists])
-        scale = np.array([float(fd.std()) for fd in self.f_dists])
-        scale_min = self.scale_floor * (hi - lo)
+        Each iteration samples from the current proposal, keeps the worst `rho`
+        fraction as the elite set, and re-fits the proposal on it with
+        importance weights (in log space, stabilised). Stops when the elite
+        quantile reaches the failure threshold, or when there are too few valid
+        points left to fit anything.
 
-        n_eval = 0
+        Returns the updated ``(loc, scale, gamma_history, n_eval)``; the
+        evaluated points are appended to `seen_X` / `seen_m` in place.
+        """
         gamma_hist: list = []
-        seen_X: list = []
-        seen_m: list = []
-
-        # ── CE phase: walk the proposal toward the failure region ───────────
         for it in range(self.max_iter):
-            q = _build_q(lo, hi, loc, scale)
+            q = build_proposal(lo, hi, loc, scale)
             X = self.sampler.from_dists(self.samples_per_iter, q, seed=seed + 1000 + it)
             m = np.asarray(self.margin_fn(X), dtype=float)
             n_eval += self.samples_per_iter
@@ -195,8 +185,7 @@ class CrossEntropyRunner:
             Xe = Xv[mv <= gamma]
             if Xe.shape[0] < 2:
                 break
-            # Elite importance weights for the CE update (log-space, stabilised).
-            logw = _logpdf_product(self.f_dists, Xe) - _logpdf_product(q, Xe)
+            logw = logpdf_product(self.f_dists, Xe) - logpdf_product(q, Xe)
             w = np.exp(logw - logw.max())
             w = w / w.sum() if w.sum() > 0 else np.ones(len(w)) / len(w)
             loc = np.clip((w[:, None] * Xe).sum(axis=0), lo, hi)
@@ -207,9 +196,19 @@ class CrossEntropyRunner:
                       f"elite={Xe.shape[0]}  eval={n_eval}", flush=True)
             if gamma <= thr:
                 break
+        return loc, scale, gamma_hist, n_eval
 
-        # ── Final estimate: IS with the defensive mixture alpha*f + (1-a)*q ──
-        q = _build_q(lo, hi, loc, scale)
+    def _final_estimate(self, q, thr: float, seed: int,
+                        rng: np.random.Generator, seen_X: list, seen_m: list,
+                        n_eval: int) -> tuple:
+        """
+        Importance sampling under the defensive mixture `alpha*f + (1-alpha)*q`.
+
+        Weights are `f/d = 1 / (alpha + (1-alpha) * q/f)`, computed in log space and
+        bounded above by `1/alpha`.
+
+        Returns ``(p_hat, ci, ess, fail_flags, n_eval)``.
+        """
         n_f = int(self.alpha * self.final_samples)
         X = np.vstack([
             self.sampler.from_dists(n_f, self.f_dists, seed=seed + 9001),
@@ -222,20 +221,17 @@ class CrossEntropyRunner:
         seen_X.append(Xv)
         seen_m.append(mv)
 
-        # weight = f/d = 1 / (alpha + (1-alpha) * q/f), computed in log space.
-        log_qf = _logpdf_product(q, Xv) - _logpdf_product(self.f_dists, Xv)
+        log_qf = logpdf_product(q, Xv) - logpdf_product(self.f_dists, Xv)
         w = 1.0 / (self.alpha + (1.0 - self.alpha) * np.exp(log_qf))
         fail = (mv < thr).astype(float)
         h = fail * w
         p_hat = float(h.mean()) if h.size else 0.0
-        ci = _bootstrap_ci(h, rng)
-        ess = effective_sample_size(w)
+        return p_hat, bootstrap_ci(h, rng), effective_sample_size(w), fail, n_eval
 
-        theta_all = np.vstack([x for x in seen_X if len(x)]) if seen_X else np.empty((0, d))
-        margins_all = np.concatenate([y for y in seen_m if len(y)]) if seen_m else np.empty(0)
-        labels_all = (margins_all < thr).astype(int)
-
-        summary = {
+    def _summary(self, seed: int, n_eval, gamma_hist, p_hat, ci, ess, fail,
+                 labels_all, margins_all, loc: np.ndarray, scale: np.ndarray) -> dict:
+        """Everything the campaign records about this run, as a flat dict."""
+        return {
             "label": self.label,
             "sampler": self.sampler.name,
             "seed": int(seed),
@@ -254,6 +250,36 @@ class CrossEntropyRunner:
             "q_loc": {n: float(v) for n, v in zip(self.param_names, loc)},
             "q_scale": {n: float(v) for n, v in zip(self.param_names, scale)},
         }
+
+    def run(self, seed: int = 0) -> SampledRareEventResult:
+        """Execute the CE descent and the final IS estimate."""
+        rng = np.random.default_rng(seed)
+        lo, hi = self.lower, self.upper
+        d = len(lo)
+        thr = self.threshold
+
+        loc = np.array([float(fd.mean()) for fd in self.f_dists])
+        scale = np.array([float(fd.std()) for fd in self.f_dists])
+        scale_min = self.scale_floor * (hi - lo)
+
+        n_eval = 0
+        gamma_hist: list = []
+        seen_X: list = []
+        seen_m: list = []
+
+        loc, scale, gamma_hist, n_eval = self._ce_descent(
+            loc, scale, scale_min, lo, hi, thr, seed, seen_X, seen_m, n_eval)
+
+        q = build_proposal(lo, hi, loc, scale)
+        p_hat, ci, ess, fail, n_eval = self._final_estimate(
+            q, thr, seed, rng, seen_X, seen_m, n_eval)
+
+        theta_all = np.vstack([x for x in seen_X if len(x)]) if seen_X else np.empty((0, d))
+        margins_all = np.concatenate([y for y in seen_m if len(y)]) if seen_m else np.empty(0)
+        labels_all = (margins_all < thr).astype(int)
+
+        summary = self._summary(seed, n_eval, gamma_hist, p_hat, ci, ess,
+                                fail, labels_all, margins_all, loc, scale)
 
         return SampledRareEventResult(
             p_fail=p_hat,
@@ -276,20 +302,20 @@ class CrossEntropyRunner:
 
 
 class LHSCrossEntropy(CrossEntropyRunner):
-    """Cross-Entropy whose per-iteration batches are stratified with a Latin Hypercube."""
 
     def __init__(self, scenario=None, **kw):
+        """Cross-Entropy whose per-iteration batches are stratified with a Latin Hypercube."""
         kw.pop("sampler", None)
         super().__init__(scenario, sampler="lhs", **kw)
 
 
 class RandomSearchCrossEntropy(CrossEntropyRunner):
-    """
-    Cross-Entropy with plain i.i.d. random draws — statistically identical to the
-    existing :func:`pipeline.rare_event.estimate_failure_probability`, and the
-    control arm for the stratified version.
-    """
 
     def __init__(self, scenario=None, **kw):
+        """
+        Cross-Entropy with plain i.i.d. random draws — statistically identical to the
+        existing :func:`pipeline.rare_event.estimate_failure_probability`, and the
+        control arm for the stratified version.
+        """
         kw.pop("sampler", None)
         super().__init__(scenario, sampler="random", **kw)

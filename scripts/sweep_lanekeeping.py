@@ -53,7 +53,7 @@ def parse_list(s: str) -> list[float]:
     return [float(x) for x in s.split(",") if x.strip()]
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="ODD sweep (max speed x max angle) for lane_keeping.")
     ap.add_argument("--n", type=int, default=15, help="LHS samples per cell (default 15)")
     ap.add_argument("--workers", type=int, default=None,
@@ -66,6 +66,11 @@ def main() -> None:
                     help="comma-separated max angles (deg) (default 45,65,85)")
     ap.add_argument("--rare-fraction", type=float, default=0.05)
     ap.add_argument("--csv", default=None, help="also save results to this CSV")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.workers is not None:

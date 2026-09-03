@@ -1,52 +1,36 @@
 """
-Calibration of a backend's operating point.
+Calibration of a backend's operating point through `speed_scale`.
 
-The problem
------------
-A backend that fails in 0% of cases, or in 100%, **carries no information**:
-there is no variance to explain, the boundary is not learnable, and the
-comparison between search methods becomes empty because either everyone finds
-everything or nobody finds anything.
+`calibrate` searches for the value of `speed_scale` -- the multiplier applied to
+the cruising speed by `scenarios.common.driver.target_speed` -- that puts the
+backend's failure rate inside a target band (by default 10-20%).
 
-Observed in practice at `speed_scale = 1.0`:
+How the search works:
 
-    Udacity  (C2, 1 worker)   5/5 falliti
-    MetaDrive (C2, smoke)     2/2 falliti
+* `scenario_evaluator` builds the callable that, given a `speed_scale`, runs a
+  batch of simulations and returns an `Evaluation` (failure rate, number of
+  valid runs, number of runs). The same seed and the same parameter design are
+  reused at every evaluation, so two evaluations differ only in `speed_scale`.
+* `calibrate` first evaluates the bracket endpoints, then calls `_bisect`, which
+  halves the interval assuming the failure rate is non-increasing in
+  `speed_scale`: if the rate at the midpoint is above the band the search moves
+  down, otherwise up.
+* `_distance_from_band` scores each evaluation by its distance from the target
+  band; the best-scoring evaluation seen is what gets returned.
+* `TOO_EASY_NOTE`, `CONTROLLER_BROKEN_NOTE` and `EXHAUSTED_NOTE` are the
+  diagnostic strings attached to `CalibrationResult` when the whole bracket
+  fails below the band, above the band, or when the evaluation budget runs out
+  before the band is reached.
 
-With those numbers any comparison between the two would measure noise.
-
-The opposite problem is just as real: lower the speed too far and nothing fails
-any more, so there is nothing left to search for.
-
-The lever
----------
-**One only**, so that the calibration can be declared rather than being a set of
-opaque adjustments: `speed_scale`, which scales the cruising speed.
-
-Why speed in particular: it acts at once on the control margin (more time to
-correct) and on the metres covered between two decisions, which is the central
-failure mechanism of this work. It is also the only parameter that means the
-same thing on every backend.
-
-The value found **must be declared in the report**: it is a parameter of the
-experiment, not an implementation detail. Two backends tuned to different
-`speed_scale` remain comparable on the SHAPE of the failure set, not on
-absolute failure rates.
-
-Metodo
-------
-Bisection on the failure rate, which is non-increasing in `speed_scale`: slower
-= fewer failures. Monotonicity is not exact (sampling is stochastic), so the
-SAME seed and the SAME parameter design are used at every evaluation: without
-that, the noise between two evaluations would be mistaken for the effect of
-speed and the bisection would not converge.
+`CalibrationResult` holds the chosen `speed_scale`, every `Evaluation` in
+search order and those notes, and serialises to JSON via `asdict`.
 """
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 import numpy as np
 
@@ -136,6 +120,55 @@ class CalibrationResult:
             json.dump(d, f, indent=2)
 
 
+def _bisect(evaluate, log, lo: float, hi: float, best: Evaluation,
+            target_low: float, target_high: float, max_iter: int) -> tuple:
+    """
+    Halve the interval until the failure rate lands inside the band.
+
+    Returns ``(hit, best)``: `hit` is the evaluation inside the band, or None if
+    the iterations ran out; `best` is the closest evaluation seen either way, so
+    an exhausted search still returns something usable.
+    """
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        v = evaluate(mid); log(v)
+
+        if _distance_from_band(v.failure_rate, target_low, target_high) < \
+           _distance_from_band(best.failure_rate, target_low, target_high):
+            best = v
+
+        if target_low <= v.failure_rate <= target_high:
+            return v, best
+
+        # Too many failures -> slow down; too few -> speed up.
+        if v.failure_rate > target_high:
+            hi = mid
+        else:
+            lo = mid
+    return None, best
+
+
+# The three ways calibration ends without centring the band. Kept as templates
+# because each one tells the reader to fix a different thing, and the wording is
+# the actionable part of the result.
+TOO_EASY_NOTE = (
+    "Even at speed_scale={scale} the failure rate does not reach {low:.0%}. "
+    "The parameter space is too easy: widen the ODD, or degrade the controller "
+    "(obs_latency / obs_lag_tau) to make a boundary emerge.")
+
+CONTROLLER_BROKEN_NOTE = (
+    "Even at speed_scale={scale} it fails in {rate:.0%} of cases. This is not a "
+    "speed problem: the controller does not hold the lane even at walking pace. "
+    "Check the steering sign and the gains BEFORE the campaign -- calibrating "
+    "here would hide the defect.")
+
+EXHAUSTED_NOTE = (
+    "Bisection exhausted after {max_iter} iterations without centring the band. "
+    "The value returned is the closest one. With {n_samples} samples the "
+    "uncertainty on the rate is about +/-{half_width:.0%}: if that is comparable "
+    "to the band width, what is needed is more samples, not more iterations.")
+
+
 def calibrate(
     evaluate: Callable[[float], Evaluation],
     *,
@@ -152,20 +185,13 @@ def calibrate(
     """
     Bisection on `speed_scale` to centre the failure rate inside the band.
 
-    `evaluate(scale) -> Evaluation` is injected: the calibration knows nothing
-    about backends and is tested with a synthetic function of known truth.
+    `evaluate(scale) -> Evaluation` is injected, so the calibration depends on no
+    backend.
 
-    Cases that are NOT an error and must be reported, not hidden:
-
-      * even at the lowest scale the backend fails too often -> the controller
-        cannot hold that scenario even at walking pace, and it is the
-        controller that needs revisiting before the campaign, not the speed;
-      * even at the highest scale it never fails -> the parameter space is too
-        easy, and the ODD must be widened or the controller degraded
-        (`obs_latency`, `obs_lag_tau`).
-
-    In both cases the endpoint closest to the band is returned with
-    `centered=False` and an explicit note.
+    Three outcomes end the search without centring the band, each returning the
+    evaluation closest to it with ``centered=False`` and a note: the rate stays
+    above the band even at `scale_min`, it stays below it even at `scale_max`, or
+    the iterations run out.
     """
     history: List[Evaluation] = []
 
@@ -189,72 +215,42 @@ def calibrate(
             target_high=target_high, centered=True, n_samples=n_samples,
             seed=seed, history=history)
 
-    # Endpoints: they say straight away whether the band is reachable.
-    #
-    # The band is checked RIGHT AFTER each endpoint, before evaluating the
-    # other: one evaluation costs `n_samples` simulations, which on Udacity
-    # means minutes.
+    def _endpoint(v: Evaluation, note: str) -> CalibrationResult:
+        return CalibrationResult(
+            backend=backend, speed_scale=v.speed_scale,
+            failure_rate=v.failure_rate, target_low=target_low,
+            target_high=target_high, centered=False, n_samples=n_samples,
+            seed=seed, history=history, note=note)
+
+    # Endpoints: they say straight away whether the band is reachable, and the
+    # band is checked RIGHT AFTER each one, before evaluating the other -- a
+    # single evaluation costs `n_samples` simulations, which on Udacity means
+    # minutes.
     high_end = evaluate(scale_max); _log(high_end)      # faster = more failures
     if target_low <= high_end.failure_rate <= target_high:
         return _within_band(high_end)
     if high_end.failure_rate < target_low:
-        return CalibrationResult(
-            backend=backend, speed_scale=scale_max,
-            failure_rate=high_end.failure_rate, target_low=target_low,
-            target_high=target_high, centered=False, n_samples=n_samples,
-            seed=seed, history=history,
-            note=(f"Even at speed_scale={scale_max} the failure rate does not "
-                  f"reach {target_low:.0%}. The parameter space is too easy: "
-                  f"widen the ODD, or degrade the controller "
-                  f"(obs_latency / obs_lag_tau) to make a boundary emerge."))
+        return _endpoint(high_end, TOO_EASY_NOTE.format(
+            scale=scale_max, low=target_low))
 
     low_end = evaluate(scale_min); _log(low_end)
     if target_low <= low_end.failure_rate <= target_high:
         return _within_band(low_end)
     if low_end.failure_rate > target_high:
-        return CalibrationResult(
-            backend=backend, speed_scale=scale_min,
-            failure_rate=low_end.failure_rate, target_low=target_low,
-            target_high=target_high, centered=False, n_samples=n_samples,
-            seed=seed, history=history,
-            note=(f"Even at speed_scale={scale_min} it fails in "
-                  f"{low_end.failure_rate:.0%} of cases. This is not a speed "
-                  f"problem: the controller does not hold the lane even at "
-                  f"walking pace. Check the steering sign and the gains BEFORE "
-                  f"the campaign -- calibrating here would hide the defect."))
+        return _endpoint(low_end, CONTROLLER_BROKEN_NOTE.format(
+            scale=scale_min, rate=low_end.failure_rate))
 
-    lo, hi = scale_min, scale_max
-    best = min((high_end, low_end),
-                   key=lambda v: _distance_from_band(v.failure_rate,
-                                                       target_low, target_high))
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        v = evaluate(mid); _log(v)
+    hit, best = _bisect(evaluate, _log, scale_min, scale_max,
+                        min((high_end, low_end),
+                            key=lambda v: _distance_from_band(
+                                v.failure_rate, target_low, target_high)),
+                        target_low, target_high, max_iter)
+    if hit is not None:
+        return _within_band(hit)
 
-        if _distance_from_band(v.failure_rate, target_low, target_high) < \
-           _distance_from_band(best.failure_rate, target_low, target_high):
-            best = v
-
-        if target_low <= v.failure_rate <= target_high:
-            return _within_band(v)
-
-        # Too many failures -> slow down; too few -> speed up.
-        if v.failure_rate > target_high:
-            hi = mid
-        else:
-            lo = mid
-
-    return CalibrationResult(
-        backend=backend, speed_scale=best.speed_scale,
-        failure_rate=best.failure_rate, target_low=target_low,
-        target_high=target_high, centered=False, n_samples=n_samples,
-        seed=seed, history=history,
-        note=(f"Bisection exhausted after {max_iter} iterations without "
-              f"centring the band. The value returned is the closest one. With "
-              f"{n_samples} samples the uncertainty on the rate is about "
-              f"+/-{1.96 * (0.25 / n_samples) ** 0.5:.0%}: if that is comparable "
-              f"to the band width, what is needed is more samples, not more "
-              f"iterations."))
+    return _endpoint(best, EXHAUSTED_NOTE.format(
+        max_iter=max_iter, n_samples=n_samples,
+        half_width=1.96 * (0.25 / n_samples) ** 0.5))
 
 
 def _distance_from_band(rate: float, low: float, high: float) -> float:
@@ -280,24 +276,16 @@ def scenario_evaluator(
     sampling: str = "uniform",
 ) -> Callable[[float], Evaluation]:
     """
-    Builds the evaluation function for a scenario from the registry.
+    Build the evaluation function for a scenario from the registry.
 
     `build_scenario(speed_scale)` must return a `BaseScenario` tuned to that
-    speed.
+    speed. The parameter design is fixed across evaluations -- same seed, same
+    thetas -- so consecutive evaluations differ only by the speed.
 
-    **The parameter design is FIXED** across evaluations: same seed, same
-    thetas. Without that, the difference between two evaluations would mix the
-    effect of speed with sampling noise, and the bisection would chase the
-    noise instead of the signal.
-
-    **`sampling` decides WHAT is being calibrated.** With `"uniform"` the design
-    is uniform over the box; with `"odd"` it goes through the operational
-    marginals (`param_distributions`), which is what the campaign's
-    `plain_sampling` arms do. The two rates do NOT coincide -- on the wide ODD
-    the uniform calibration gave 17.2% while `plain_sampling` measured 3.2%, a
-    factor of 5 -- so calibrating a band in uniform and then reading it under
-    the ODD puts the campaign out of band. Use `"odd"` when the target is the
-    rate of the blind-sampling arms.
+    `sampling` selects the distribution the design is drawn from: `"uniform"`
+    over the box, or `"odd"` through the operational marginals
+    (`param_distributions`), which is what the campaign's `plain_sampling` arms
+    use. The two give different failure rates on the same scenario.
     """
     from scipy.stats.qmc import LatinHypercube, scale as qmc_scale
 

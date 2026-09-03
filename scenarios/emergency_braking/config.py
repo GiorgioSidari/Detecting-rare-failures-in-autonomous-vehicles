@@ -13,7 +13,7 @@ import os
 import numpy as np
 from scenarios.base_scenario import BaseScenario
 from simulators.emergency_braking import EmergencyBrakingSimulator
-from evaluation.qoi import compute_safety_margin, failure_indicator
+from evaluation.qoi import compute_safety_margin
 
 _DEFAULT_MODEL_PATH = os.path.join(
     os.path.dirname(__file__), "models", "emergency_braking_mlp.keras"

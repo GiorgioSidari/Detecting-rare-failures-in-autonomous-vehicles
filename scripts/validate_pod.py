@@ -33,7 +33,7 @@ print(f"  trajectories shape : {trajectories.shape}  (expected ({N_TRAJECTORIES}
 embedder = EmbedderPOD(variance_threshold=0.99)
 codes = embedder.fit_transform(trajectories)
 
-print(f"\nPOD fit results:")
+print("\nPOD fit results:")
 print(f"  nModes             : {embedder.nModes}")
 print(f"  explained variance : {embedder.explained_variance * 100:.4f}%")
 print(f"  codes shape        : {codes.shape}  (expected ({N_TRAJECTORIES}, {embedder.nModes}))")
@@ -67,7 +67,7 @@ recon_flat = reconstructed.reshape(N_TRAJECTORIES, -1) - mean_traj
 rel_rmse = np.sqrt(np.mean((centered - recon_flat) ** 2)) / np.sqrt(np.mean(centered ** 2))
 expected_rel_rmse = np.sqrt(1.0 - embedder.explained_variance)
 
-print(f"\nReconstruction error (relative RMSE on centered data):")
+print("\nReconstruction error (relative RMSE on centered data):")
 print(f"  measured  : {rel_rmse * 100:.4f}%")
 print(f"  expected  : {expected_rel_rmse * 100:.4f}%  (= sqrt(1 - explained_variance))")
 

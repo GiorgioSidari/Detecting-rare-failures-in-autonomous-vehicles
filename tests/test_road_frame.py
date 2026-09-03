@@ -1,28 +1,22 @@
 """
-Tests for the shared lateral- and heading-error computation.
+Tests for the shared lateral- and heading-error computation of
+`scenarios/common/road_frame.py`.
 
-The validity of the C2 arm depends on this module: if the backends received
-different inputs, "the same controller on different simulators" would be false.
+They cover the projection onto the polyline (nearest segment rather than nearest
+vertex, clamping past the ends, arc length, rejection of a too-short polyline),
+the sign convention of the lateral error, the heading error against the local
+tangent and its wrapping, both on straight roads and on an arc, and
+`yaw_from_positions` including its stopped-vehicle fallback.
 
-The most informative test is `test_agrees_with_the_udacity_cte`: it compares our
-lateral error with the definition Unity uses. It is not an implementation test,
-it is a validation of the geometric chain against an external reference
-esterno.
+`test_agrees_with_the_udacity_cte` compares the lateral error computed here with
+the `cte` definition used by Unity, on the same road and positions.
 """
 from __future__ import annotations
 
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SIM_ROOT = os.path.join(_REPO_ROOT, "opensbt-core")
-for _p in (_REPO_ROOT, _SIM_ROOT):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from scenarios.common.road_frame import (          # noqa: E402
     cumulative_s,

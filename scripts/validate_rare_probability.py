@@ -59,7 +59,7 @@ def ppf_sample(dists, unit):
     return out
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="M3 validation of the P(failure) estimate.")
     ap.add_argument("--ns", default="50,200,1000",
                     help="N values to test, comma-separated (default 50,200,1000)")
@@ -71,6 +71,11 @@ def main() -> None:
                     help="angle threshold of the synthetic rule (default 70: rare regime)")
     ap.add_argument("--speed-thr", type=float, default=26.0,
                     help="speed threshold of the synthetic rule (default 26: rare regime)")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     Ns = [int(x) for x in args.ns.split(",") if x.strip()]

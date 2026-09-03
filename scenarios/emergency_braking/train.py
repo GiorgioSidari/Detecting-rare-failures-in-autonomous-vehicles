@@ -72,7 +72,7 @@ def generate_dataset(n: int = N_TRAIN, seed: int = SEED, save: bool = True):
     # trajectories : (n, T, 2)  — [:, :, 0] = position, [:, :, 1] = velocity
     # actual_delays: (n,)        — real reaction delay (nominal + noise)
 
-    print(f"  Building state-action pairs …")
+    print("  Building state-action pairs …")
 
     # ── 3. Build feature matrix X and label vector y ─────────────────────────
     # Time axis: shape (T,)

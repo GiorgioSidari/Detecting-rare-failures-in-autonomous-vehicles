@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Find the worst case: minimise the scenario's QoI safety margin.
+Minimise the scenario's QoI safety margin: search for the worst case.
 
-Where run_rare_event.py answers "how OFTEN does it fail" and
-run_active_boundary.py answers "WHERE is the fail/safe boundary", this script
-answers "how BAD can it get" — the parameter combination that drives the
-composite lane-keeping margin as low as it goes.
+The script runs one of the two optimisers of `pipeline.qoi_optimizer` against
+the lane-keeping scenario and prints the resulting report -- the lowest margin
+found, the parameters that produced it and the evaluation history.
 
-Two optimisers, both budgeted in simulations:
-    --method bayes   GP surrogate + Expected Improvement. Most sample-efficient;
-                     also reports which parameters drive the worst case (ARD).
-    --method cmaes   CMA-ES. Evaluates a full generation per step, so it uses
-                     the parallel simulator pool well and copes with rugged,
-                     noisy landscapes.
+    --method bayes   `BayesianQoIOptimizer`: GP surrogate + Expected
+                     Improvement. Also reports the ARD length-scales of the
+                     fitted kernel, one per parameter.
+    --method cmaes   `CMAESQoIOptimizer`: evaluates one generation per
+                     iteration, so a whole generation goes to the simulator pool
+                     at once.
+    --compare        runs both on the same budget and prints them side by side.
+
+The budget is expressed in simulations.
 
 Prerequisites: the opensbt-core simulator containers must be running.
 
@@ -20,11 +22,11 @@ Usage:
     python scripts/run_qoi_optimizer.py --budget 120
     python scripts/run_qoi_optimizer.py --method cmaes --budget 200 --workers 6
     python scripts/run_qoi_optimizer.py --preset realistic --max-angle 20
-    python scripts/run_qoi_optimizer.py --compare --budget 120     # both, side by side
+    python scripts/run_qoi_optimizer.py --compare --budget 120
 
-Caveat worth repeating: the minimiser is the WORST case, not the likeliest one.
-A worst case sitting in a corner of the ODD with probability 1e-9 is a good
-stress test and a bad risk estimate — read it next to the rare-event probability.
+The reported point is the lowest margin found inside the ODD box; it is not
+weighted by the operational density, which `scripts/run_rare_event.py`
+estimates instead.
 """
 from __future__ import annotations
 
@@ -35,12 +37,16 @@ import sys
 import time
 import warnings
 
+from pipeline.odd_presets import add_odd_args, resolve_bounds
+from pipeline.qoi_optimizer import BayesianQoIOptimizer, CMAESQoIOptimizer
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(description="Minimise the QoI margin (worst-case search).")
     ap.add_argument("--scenario", default="lane_keeping")
     ap.add_argument("--method", choices=["bayes", "cmaes"], default="bayes")
@@ -61,8 +67,12 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="write the result summary to this JSON file")
     ap.add_argument("--quiet", action="store_true")
 
-    from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.workers is not None:
@@ -71,7 +81,6 @@ def main() -> None:
     from sklearn.exceptions import ConvergenceWarning
     warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-    from pipeline.qoi_optimizer import BayesianQoIOptimizer, CMAESQoIOptimizer
     from scenarios import SCENARIOS
 
     scenario = SCENARIOS[args.scenario]

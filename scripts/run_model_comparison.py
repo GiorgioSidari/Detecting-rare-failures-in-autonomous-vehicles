@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-Compare every search method at a matched budget, on the real simulator.
+Compare every search method at a matched budget on the Udacity backend.
 
-Runs, per seed:
-    active_boundary[lhs]   vs  active_boundary[random]
-    cross_entropy[lhs]     vs  cross_entropy[random]
-    plain_sampling[lhs]    vs  plain_sampling[random]      (the floor)
+Per seed the script runs the six arms
 
-then extracts one shared map of failure regions from the union of everything
-found and reports, per region, the probability that a blind draw lands in it.
-The question this answers is not "who finds more failures" but "do the methods
-find the SAME failures, and how unreachable are the ones only LHS reaches".
+    active_boundary[lhs]   active_boundary[random]
+    cross_entropy[lhs]     cross_entropy[random]
+    plain_sampling[lhs]    plain_sampling[random]
+
+through `pipeline.model_comparison.ModelComparison`, then extracts one shared
+map of failure regions from the union of all the failures found and reports,
+per region, the probability that a draw from the operational distribution lands
+in it. `build_arms` constructs the arm list and is reused by
+`scripts/run_model_comparison_md.py`.
+
+With `--out` the campaign is saved as `<out>_raw.npz` (the raw clouds) and
+`<out>.json` (metadata and per-seed summaries), which `scripts/rank_arms.py`
+and `scripts/reanalyze_regions.py` read back.
 
 Prerequisites: the opensbt-core simulator containers must be running (see the
-README). Budget is the experiment: at ~10 s per run, --budget 200 with 3 seeds
-and 6 arms is roughly 10 hours. Start small (--budget 60 --seeds 0) and grow.
+README). Cost scales as budget x seeds x arms simulations, at roughly 10 s per
+simulation.
 
 Usage:
     python scripts/run_model_comparison.py --budget 120 --seeds 0 1 2
@@ -22,8 +28,8 @@ Usage:
     python scripts/run_model_comparison.py --arms ab_lhs ab_random --budget 80
     python scripts/run_model_comparison.py --out results/cmp_run1
 
-For a Docker-free sanity check of the whole comparison machinery, run
-scripts/validate_model_comparison.py instead.
+`scripts/validate_model_comparison.py` runs the same machinery on a synthetic
+scenario, without Docker.
 """
 from __future__ import annotations
 
@@ -32,6 +38,9 @@ import os
 import sys
 import time
 import warnings
+
+from pipeline.odd_presets import add_odd_args, resolve_bounds
+from pipeline.model_comparison import ModelComparison
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -90,7 +99,8 @@ def build_arms(names, scenario, budget, n_iter, ce_max_iter, lower, upper, verbo
     return [factory[n]() for n in names]
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description="Matched-budget comparison of the failure-search methods.")
     ap.add_argument("--scenario", default="lane_keeping")
@@ -133,8 +143,12 @@ def main() -> None:
                     help="skip the one-simulation-per-container check before starting")
     ap.add_argument("--quiet", action="store_true")
 
-    from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.workers is not None:
@@ -143,7 +157,6 @@ def main() -> None:
     from sklearn.exceptions import ConvergenceWarning
     warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-    from pipeline.model_comparison import ModelComparison
     from scenarios import SCENARIOS
 
     scenario = SCENARIOS[args.scenario]

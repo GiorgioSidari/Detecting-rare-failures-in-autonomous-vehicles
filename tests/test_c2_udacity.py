@@ -14,19 +14,13 @@ from __future__ import annotations
 
 import math
 import os
-import sys
 import types
 
 import numpy as np
 import pytest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SIM_ROOT = os.path.join(_REPO_ROOT, "opensbt-core")
 _LK_ROOT = os.path.join(_REPO_ROOT, "opensbt-core", "Simulator")
-for _p in (_REPO_ROOT, _SIM_ROOT, _LK_ROOT):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 from scenarios.common.driver import LateralFeedbackDriver           # noqa: E402
 from scenarios.common.road_frame import road_frame              # noqa: E402
 from scenarios.common.road_geometry import road_polyline      # noqa: E402
@@ -42,8 +36,6 @@ def _load_state_based_agent():
     tensorflow. The stubs are removed straight after: `sys.modules` is global
     for the pytest session.
     """
-    import importlib.util
-
     path = os.path.join(_LK_ROOT, "c2", "state_based_agent.py")
     if not os.path.isfile(path):
         return None
@@ -201,7 +193,7 @@ def _drive(agent, xy, *, y0=0.0, v=10.0, dt=0.1, steps=300,
         errs.append(fr.lateral_error)
         act = agent.predict(obs=None,
                             state={"speed": v * 3.6, "pos": (x, y, 0.0), "dt": dt})
-        steer, throttle = float(act[0][0]), float(act[0][1])
+        steer = float(act[0][0])
         yaw += (v / wheelbase) * math.tan(steer * max_steer_rad) * dt
         x += v * math.cos(yaw) * dt
         y += v * math.sin(yaw) * dt

@@ -31,12 +31,12 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from scenarios import SCENARIOS
-from pipeline.active_boundary import run_active_boundary, _p_fail
+from pipeline.active_boundary import run_active_boundary, failure_probability
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="lane_keeping_md")
     ap.add_argument("--speed-scale", type=float, default=0.3)
@@ -45,6 +45,11 @@ def main() -> None:
     ap.add_argument("--n-iter", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="boundary_md.png")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     sc = SCENARIOS[args.scenario]
@@ -72,7 +77,7 @@ def main() -> None:
     grid[:, 5] = np.minimum(grid[:, 5], grid[:, 6])    # keep min_speed <= max_speed
 
     mu, sig = gp.predict((grid - lower) / span, return_std=True)
-    P = _p_fail(mu, sig, thr).reshape(AA.shape)
+    P = failure_probability(mu, sig, thr).reshape(AA.shape)
 
     fig, ax = plt.subplots(figsize=(7.5, 5.5))
     cf = ax.contourf(AA, SS, P, levels=np.linspace(0, 1, 11), cmap="RdYlGn_r", alpha=0.9)

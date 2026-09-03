@@ -45,6 +45,8 @@ if _PROJECT_ROOT not in sys.path:
 
 from pipeline.operating_point import calibrate, scenario_evaluator   # noqa: E402
 
+from pipeline.odd_presets import add_odd_args, resolve_bounds
+
 
 def _scenario_builder(name: str):
     """
@@ -84,26 +86,16 @@ def _scenario_builder(name: str):
 
 def _obs_lag_builder(name: str, speed_scale: float):
     """
-    Returns `obs_lag -> BaseScenario`: the second lever of the operating point.
+    Returns a callable `obs_lag -> BaseScenario`, the second calibration lever.
 
-    Why it exists
-    -------------
-    `speed_scale` is not always enough. On a narrow ODD (gentle curves, tight
-    speed band) a lateral controller reading the EXACT state does not fail even at
-    `speed_scale = 1.0`: there is no admissible speed that takes it out of the
-    lane, so there is no boundary to learn and the comparison between search
-    methods stays empty.
+    Where `speed_scale` scales the cruising speed, `obs_lag_tau` sets the time
+    constant of the EMA the driver applies to the observed lateral and heading
+    errors, so the controller acts on smoothed, lagging observations. The returned
+    builder constructs a scenario whose driver carries the given `obs_lag_tau`,
+    leaving every other parameter unchanged.
 
-    `obs_lag_tau` acts on the right mechanism instead of on speed: the
-    controller steers on stale observations, which is the failure mode of the
-    image-based network -- not "it drives too fast". And because a latency
-    fixed in time becomes a staleness growing in metres as speed rises, the
-    failures stay *scenario-dependent*, which is the condition for a search to
-    have anything to find.
-
-    NOTE: enabling it changes the system under test. A campaign with
-    `obs_lag > 0` is not comparable with one on an ideal controller, and the
-    value must be declared next to the results exactly like `speed_scale`.
+    A campaign run with `obs_lag > 0` uses a different controller from one run
+    without it, so the value belongs with the results, like `speed_scale`.
     """
     if name not in ("lane_keeping_md", "metadrive", "md"):
         raise SystemExit(
@@ -120,7 +112,8 @@ def _obs_lag_builder(name: str, speed_scale: float):
     return _build, "lane_keeping_md"
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("backend", help="lane_keeping_md | lane_keeping")
@@ -159,8 +152,12 @@ def main() -> int:
     # bounds, and the value found was then reused on narrow ODDs where it means
     # something entirely different -- which is how a whole campaign can return
     # zero failures out of 8198 simulations.
-    from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
+    return ap
+
+
+def main() -> int:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.lever == "obs_lag":

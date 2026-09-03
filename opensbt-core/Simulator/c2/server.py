@@ -1,23 +1,17 @@
 """
-FastAPI server of the C2 arm -- a copy of `SimulatorServer.py` with one change.
+FastAPI server of the state-based arm: a copy of `SimulatorServer.py` whose
+only difference is the simulator it instantiates (`UdacitySimulatorC2` instead
+of `UdacitySimulator`).
 
-It is a copy and not a modification of the original because
-`SimulatorServer.py` is pre-existing code of the Udacity pipeline: changing it
-would also change the C1 arm and the work of whoever uses it.
+Routes, job queue, job handling and response format are identical to the
+original, so a client talks to either the same way.
 
-The only difference is the simulator instantiated (`UdacitySimulatorC2` instead
-of `UdacitySimulator`). Contract, queue, job handling and response format are
-identical, so the client cannot tell the two arms apart.
-
-It is selected in the compose file without touching the Dockerfile:
+It is selected in the compose file, without a separate Dockerfile:
 
     command: uvicorn Simulator.c2.server:app --host 0.0.0.0 --port 8000
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
-from dataclasses import asdict
 from fastapi.encoders import jsonable_encoder
 import numpy as np
 from queue import Queue

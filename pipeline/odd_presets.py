@@ -1,16 +1,11 @@
 """
 ODD (Operational Design Domain) presets and narrowing helpers.
 
-Every runner script needs the same thing: take the scenario's default parameter
-bounds and optionally shrink them toward the regime where failures are RARE
-(gentle curves, moderate speeds), because that is the regime where the whole
-question — "does stratified sampling find the rare failure region?" — is
-actually interesting. On the wide default ODD failures are common and every
-method finds them.
-
-The narrowing rules mirror the ones already used by ``scripts/run_active_boundary.py``
-and ``scripts/run_rare_event.py``; they live here so the new scripts do not
-duplicate them a third time.
+The functions here take a scenario's default parameter bounds and return
+narrowed ones, so the runner scripts share a single definition of each preset
+instead of each implementing the same `--max-angle` / `--max-speed` /
+`--max-seg` flags. The same rules are used by `scripts/run_active_boundary.py`
+and `scripts/run_rare_event.py`.
 
 Lane-keeping parameter layout (9 dimensions):
     0-4 : road angles 1..5 (deg)
@@ -34,7 +29,7 @@ IDX_MAX_SPEED = 6
 IDX_SEGMENT = 7
 
 
-def narrow_bounds(lower, upper, *, max_angle=None, max_speed=None,
+def narrow_bounds(lower: np.ndarray, upper: np.ndarray, *, max_angle=None, max_speed=None,
                   min_speed=None, max_seg=None, min_seg=None):
     """
     Shrink the ODD toward the rare-failure regime.

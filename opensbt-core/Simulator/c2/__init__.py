@@ -1,32 +1,23 @@
 """
-C2 arm on Udacity -- an **additive** package, it does not touch `lanekeeping/`.
+State-based arm on Udacity: an additive package that leaves `lanekeeping/`
+untouched.
 
-Project constraint: nothing that existed in `opensbt-core` before this branch is
-modified. `lanekeeping/` is the working Udacity pipeline, used by others too: a
-change there propagates into work that is not ours.
+The package reuses `lanekeeping` by composition:
 
-So C2 lives here and **reuses** `lanekeeping` by composition:
+  * `state_based_agent.StateBasedAgent` -- implements the same interface as
+    `SupervisedAgent` (`predict(obs, state)`), so the two are interchangeable;
+  * `udacity_simulation_c2.UdacitySimulatorC2` -- subclasses `UdacitySimulator`,
+    inheriting `__init__` (which brings up the Unity environment) and overriding
+    `simulate()` with a loop that also passes the agent `pos`, the run's
+    centreline and the measured `dt`, none of which the inherited loop supplies;
+  * `server.py` -- a FastAPI application exposing the same routes and payloads
+    as `SimulatorServer.py`, so a client sees no difference between the arms.
 
-  * `state_based_agent.StateBasedAgent`  -- implements the same interface as
-    `SupervisedAgent` (`predict(obs, state)`), so it is interchangeable;
-  * `udacity_simulation_c2.UdacitySimulatorC2` -- a subclass of
-    `UdacitySimulator`: it reuses `__init__` for the Unity environment and
-    overrides `simulate()` with the loop the state-based controller needs;
-  * `server.py` -- a FastAPI server with the same contract as
-    `SimulatorServer.py`, so the client cannot tell the two arms apart.
-
-The container is chosen at runtime by changing only the compose entrypoint:
+Which of the two runs inside the container is selected by the compose
+entrypoint alone:
 
     command: uvicorn Simulator.c2.server:app --host 0.0.0.0 --port 8000
 
-No new Dockerfile: the existing one already copies all of `./Simulator`.
-
-Why the loop is rewritten rather than reused
---------------------------------------------
-`UdacitySimulator.simulate()` passes the agent only `speed` and
-`simulator_name`. The state-based controller also needs `pos` (to project itself
-onto the road), the run's centreline, and the real `dt` (Udacity's control rate
-varies with load). Adding those to the original loop would mean modifying it;
-rewriting it here leaves the original intact, at the price of a duplication that
-`tests/test_c2_udacity.py` keeps under control.
+There is no separate Dockerfile: the existing one copies the whole `./Simulator`
+tree. `tests/test_c2_udacity.py` covers the rewritten loop.
 """

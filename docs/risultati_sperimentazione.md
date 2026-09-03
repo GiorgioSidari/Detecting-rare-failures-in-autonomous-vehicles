@@ -1042,8 +1042,9 @@ contro 2 e 4 della cross-entropy e 13 e 14 del pavimento.
 
 I risultati stanno in `results/` (una coppia `.npz` + `.json` per campagna), i
 piani pre-registrati in `docs/preregistrazione_*.json`, committati prima dei
-dati. **L'elenco dei file, i comandi che li generano e la mappa dei moduli sono
-in `docs/comandi_riproduzione.md`.**
+dati. **I comandi che generano ogni campagna, la taratura, le classifiche e il
+confronto cross-simulatore sono nel `README.md`**, sezione «Reproducing the
+campaigns», insieme alla tabella degli script di supporto.
 
 Il punto che conta qui: `scripts/rank_arms.py` **non simula**. Rilegge il `.npz`
 e ricalcola classifica, test appaiati e sequenza pre-registrata in una decina di

@@ -1,33 +1,19 @@
 #!/usr/bin/env python3
 """
-Search-method comparison on the MetaDrive backend -- an ADDITIONAL campaign.
+Search-method comparison on the MetaDrive backend.
 
-Why a new file instead of an option in `run_model_comparison.py`
----------------------------------------------------------------------
-That script is the one the Udacity campaign was run with, and that campaign is
-finished. It is left alone: any change, even a backward-compatible one, makes it
-harder to argue that the results already obtained are the ones from back then.
+The script reuses `build_arms` from `scripts/run_model_comparison.py` and the
+same `ModelComparison` harness; what differs is the backend
+(`LaneKeepingMetaDriveScenario`) and the operating point.
 
-This reuses its functions (`build_arms`) and the same `ModelComparison`,
-changing only the backend and the operating point. The search procedure is
-identical, so the two outcomes can be placed side by side.
+The scenario is instantiated here rather than taken from the registry, because
+the registry builds it with its default `speed_scale = 1.0`, while this campaign
+runs at the calibrated value produced by
+`scripts/calibrate_operating_point.py`.
 
-Why `--scenario lane_keeping_md` is not enough
----------------------------------------------
-The registry instantiates `LaneKeepingMetaDriveScenario()` with the defaults,
-i.e. `speed_scale=1.0`. At that speed MetaDrive fails in 94.8% of cases
-(measured, n=60): a backend that almost always fails has no boundary to learn,
-and the comparison between search methods becomes empty. The calibrated
-operating point is 0.3625 -> 17.2%, inside the 10-20% band.
-
-What this campaign is, and what it is not
----------------------------------------
-It is NOT a verification of the failures found on Udacity. There the
-`mixed-chauffeur.h5` network was driving; here the state-based lateral controller
-drives. The system under test is different, not only the simulator. It is a
-second independent experiment with the same scenario, the same metric and the
-same procedure -- useful as a methodological replication, not as a confirmation
-of the results.
+The controller driving here is the state-based lateral controller of
+`scenarios/common/driver.py`, not the `mixed-chauffeur.h5` network used by the
+Udacity campaign.
 
 Usage:
     python scripts/run_model_comparison_md.py --budget 120 --seeds 0 1 2
@@ -44,6 +30,10 @@ import warnings
 
 import numpy as np
 
+from run_model_comparison import ARM_CHOICES, build_arms
+from pipeline.odd_presets import add_odd_args, resolve_bounds
+from pipeline.model_comparison import ModelComparison
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -53,11 +43,12 @@ if _PROJECT_ROOT not in sys.path:
 SPEED_SCALE = 0.3625
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--budget", type=int, default=120,
-                    help="simulazioni per braccio per seed")
+                    help="simulations per arm per seed")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
     ap.add_argument("--speed-scale", type=float, default=SPEED_SCALE,
                     dest="speed_scale",
@@ -72,7 +63,6 @@ def main() -> None:
     ap.add_argument("--order-seed", type=int, default=0)
     ap.add_argument("--quiet", action="store_true")
 
-    from run_model_comparison import ARM_CHOICES, build_arms
     ap.add_argument("--arms", nargs="+", choices=ARM_CHOICES,
                     default=["ab_lhs", "ab_random", "ce_lhs", "ce_random",
                              "plain_lhs", "plain_random"])
@@ -102,14 +92,17 @@ def main() -> None:
     ap.add_argument("--steer-noise", type=float, default=0.0, dest="steer_noise",
                     help="deviazione standard del rumore sullo sterzo (0 = off)")
 
-    from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     from sklearn.exceptions import ConvergenceWarning
     warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-    from pipeline.model_comparison import ModelComparison
     from scenarios.lane_keeping_md import LaneKeepingMetaDriveScenario
 
     # A dedicated instance, NOT the registry's: the operating point is part of

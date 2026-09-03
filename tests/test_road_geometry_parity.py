@@ -1,19 +1,16 @@
 """
-Parity between the copy in `scenarios/common/road_geometry.py` and the real
-Udacity generator.
+Parity between `scenarios/common/road_geometry.py` and the road generator in
+`opensbt-core/Simulator/lanekeeping/`.
 
-`road_geometry` is a copy of the mathematics that lives in
-`opensbt-core/Simulator/lanekeeping/`, because that package cannot be imported
-without dragging in tensorflow, gym, matplotlib and UdacitySimulatorIO (see the
-module docstring).
+The tests import both and check, for the same theta, that the control nodes are
+identical, that the Catmull-Rom centrelines coincide within tolerance, that the
+shared constants match, and that node and segment counts agree. A further test
+checks that a road generated with zero angles is straight.
 
-A copy without a parity test is debt that surfaces late and in the wrong place:
-if the two generators diverge, the backends drive DIFFERENT roads and every
-comparison between them loses its meaning -- with nothing to flag the problem.
-This test is the guardrail.
-
-If it fails: the Udacity generator changed. Carry the change over into
-`scenarios/common/road_geometry.py`, do NOT loosen the tolerances.
+A failure means the two implementations have diverged, so the same theta gives a
+different road on each backend. The fix is to carry the change from the Udacity
+generator into `scenarios/common/road_geometry.py`, and from there to the
+vendored copy under `opensbt-core/Simulator/shared/`.
 """
 from __future__ import annotations
 
@@ -25,25 +22,20 @@ import numpy as np
 import pytest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SIM_ROOT = os.path.join(_REPO_ROOT, "opensbt-core")
-# `lanekeeping` is not inside a package: it must be imported with Simulator/ on sys.path.
 _LK_ROOT = os.path.join(_REPO_ROOT, "opensbt-core", "Simulator")
-for _p in (_SIM_ROOT, _LK_ROOT):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from scenarios.common import road_geometry as rg   # noqa: E402
 
 
 def _bootstrap_lanekeeping() -> bool:
     """
-    Makes the Udacity generator importable outside the container, skipping the
-    `__init__.py` files with side effects (UdacitySimulatorIO, tensorflow) and
-    stubbing the dependencies that only serve plotting.
+    Makes the Udacity generator importable outside the container: loads the modules
+    directly, bypassing the `__init__.py` files whose imports have side effects
+    (UdacitySimulatorIO, tensorflow), and stubs the dependencies used only for
+    plotting.
 
-    Returns False if the import remains impossible: in that case the test is
-    skipped rather than failed, because the absence of the Udacity source is not
-    a defect of our code.
+    Returns False when the import is still not possible, in which case the parity
+    tests are skipped: the Udacity sources are not present in every checkout.
     """
     lk = os.path.join(_LK_ROOT, "lanekeeping")
     if not os.path.isdir(lk):

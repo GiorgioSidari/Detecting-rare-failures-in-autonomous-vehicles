@@ -19,23 +19,16 @@ The tests below fall into two groups:
 from __future__ import annotations
 
 import math
-import os
 import sys
 
 import numpy as np
 import pytest
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for _p in (_REPO_ROOT, os.path.join(_REPO_ROOT, "opensbt-core")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 from scenarios.common.road_geometry import road_polyline            # noqa: E402
 from scenarios.lane_keeping_md.scenario_map import (                # noqa: E402
-    build_scenario_description, centerline,
+    build_scenario_description,
 )
 
-sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 from diag_road_parity import (                                      # noqa: E402
     EDGE_MARGIN_M, THRESHOLD_M, point_to_polyline_distance,
     _centerline_metadrive, _reference_centerline,
@@ -47,7 +40,7 @@ try:
 except Exception:                                                   # pragma: no cover
     _has_metadrive = False
 
-richiede_metadrive = pytest.mark.skipif(
+requires_metadrive = pytest.mark.skipif(
     not _has_metadrive, reason="MetaDrive is not installed in this environment")
 
 
@@ -165,14 +158,14 @@ def test_legacy_lengths_are_uncorrelated():
     lu = [L(_reference_centerline(r)) for r in th]
     lm = [L(_centerline_metadrive(r, legacy=True)) for r in th]
     rho = spearmanr(lu, lm).statistic
-    assert abs(rho) < 0.5, f"expected scorrelato, rho={rho:.3f}"
-    # e Udacity ha lunghezza quasi costante: `segment_length` è quasi inerte lì
+    assert abs(rho) < 0.5, f"expected uncorrelated, rho={rho:.3f}"
+    # and Udacity's length is nearly constant: `segment_length` is almost inert there
     assert (max(lu) - min(lu)) / np.mean(lu) < 0.05
 
 
 # -- the lane MetaDrive actually builds ---------------------------------------
 
-@richiede_metadrive
+@requires_metadrive
 @pytest.mark.parametrize("i", [0, 1, 2])
 def test_metadrive_lane_matches_udacity(i):
     """The load-bearing test: parity within threshold on the actual lane."""
@@ -190,7 +183,7 @@ def test_metadrive_lane_matches_udacity(i):
     assert err[inside].mean() < 0.01
 
 
-@richiede_metadrive
+@requires_metadrive
 def test_lane_length_within_one_percent():
     for row in _theta(3):
         ref = _reference_centerline(row)
@@ -202,7 +195,7 @@ def test_lane_length_within_one_percent():
 
 # -- the sign of the lateral error --------------------------------------------
 
-@richiede_metadrive
+@requires_metadrive
 def test_xte_does_not_use_the_metadrive_convention():
     """
     `ScenarioLane.local_coordinates` returns the lateral value with the OPPOSITE
@@ -241,7 +234,7 @@ def test_xte_does_not_use_the_metadrive_convention():
         env.close()
 
 
-@richiede_metadrive
+@requires_metadrive
 def test_vehicle_stays_in_lane():
     """
     End-to-end check: with the right sign the controller holds the lane.

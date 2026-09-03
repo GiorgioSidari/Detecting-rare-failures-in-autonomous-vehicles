@@ -6,7 +6,7 @@ TODO (Blocco 2b): implement after EvasiveLSTM is trained.
 
 import numpy as np
 from simulators.base_simulator import BaseSimulator
-from scenarios.cut_in.nn_controller import EvasiveLSTM, SEQUENCE_LEN
+from scenarios.cut_in.nn_controller import EvasiveLSTM
 
 
 class CutInNNSimulator(BaseSimulator):

@@ -1,22 +1,21 @@
 """
-Run every search method under one budget and compare what they actually found.
+Harness that runs several search arms at a matched budget and compares them.
 
 The classes in :mod:`pipeline.active_boundary_random` and
 :mod:`pipeline.rare_event_random` each produce a cloud of evaluated points and a
-P(failure) estimate. This module is the harness that runs them side by side and
-turns the raw output into the comparison we care about:
+P(failure) estimate. This module runs them over a list of seeds and assembles:
 
-  * per-arm statistics over several seeds (P(failure), failures found, worst
-    margin) — a single seed proves nothing when the whole point is variance;
-  * a SHARED map of failure regions built from the union of all arms
-    (:mod:`pipeline.failure_regions`), so we can say whether the arms found the
-    *same* regions or merely the same *number* of failures;
-  * for each region, the probability that a blind draw lands in it, and hence
-    how many blind draws random search would need.
+  * per-arm statistics across the seeds (P(failure), failures found, worst
+    margin, 5th-percentile margin);
+  * one shared map of failure regions built from the union of every arm's
+    failures (:mod:`pipeline.failure_regions`), so the arms are scored against
+    the same regions;
+  * for each region, the probability that a blind draw lands in it and the
+    number of blind draws needed for even odds;
+  * a paired LHS-vs-random test per family, and a diagnostic for drift over the
+    session.
 
-Arms are compared at a matched simulation budget. That is the only way the
-comparison means anything: with the real Unity simulator at ~10 s/run, budget IS
-the experiment.
+Every arm receives the same simulation budget.
 
 Usage
 -----
@@ -45,7 +44,7 @@ from pipeline.active_boundary_random import (
     LHSActiveBoundary,
     RandomSearchActiveBoundary,
 )
-from pipeline.failure_regions import compare_failure_regions
+from pipeline.region_comparison import compare_failure_regions
 from pipeline.rare_event_random import LHSCrossEntropy, RandomSearchCrossEntropy
 from pipeline.samplers import get_sampler
 
@@ -67,18 +66,16 @@ class BaselineResult:
 
 
 class PlainSamplingBaseline:
-    """
-    One-shot sampling of the ODD with no adaptation at all: sample n points,
-    simulate, count failures. This is the honest floor. Any method that cannot
-    beat it at the same budget is not earning its complexity.
-
-    With ``sampler="lhs"`` it reproduces what ``orchestrator.run(sampling=
-    "realistic")`` does; with ``sampler="random"`` it is textbook Monte Carlo.
-    """
 
     def __init__(self, scenario, sampler="random", *, n_samples: int = 200,
                  weight_by_odd: bool = True, param_lower=None, param_upper=None,
                  verbose: bool = False):
+        """
+        One-shot sampling of the ODD: draw n points, simulate them, count failures.
+
+        No model and no adaptation: the points are chosen before any result is seen.
+        ``sampler="lhs"`` stratifies the draw, ``sampler="random"`` draws i.i.d.
+        """
         if isinstance(scenario, str):
             from scenarios import SCENARIOS
             scenario = SCENARIOS[scenario]
@@ -178,23 +175,14 @@ class ComparisonResult:
         """
         Compare each family's LHS arm against its random arm, seed by seed.
 
-        This is a more sensitive instrument than the region analysis, and it
-        answers a slightly different question: not "does LHS reach regions random
-        misses" but "does LHS find MORE failures, and WORSE ones, at the same
-        budget". It works even when the failures have no region structure, which
-        is the situation the region analysis honestly refuses to interpret.
+        The two arms of a family are compared within each seed, on three metrics:
+        failures found, worst margin and P(failure). The test on the per-seed
+        differences is a Wilcoxon signed-rank, which assumes nothing about their
+        distribution.
 
-        Pairing matters. Seed-to-seed variation on this simulator is larger than
-        the difference between designs, so comparing pooled means throws the
-        signal away; comparing the two designs *within* each seed removes the
-        seed effect. The test is a Wilcoxon signed-rank on the per-seed
-        differences — non-parametric, because with a handful of seeds normality
-        is an assumption we have no way to check.
-
-        Note the resolution limit: with n seeds the smallest two-sided p-value
-        the test can produce is 2/2^n (0.031 at 6 seeds, 0.002 at 10). A result
-        at p = 0.06 with 6 seeds is the best the design can show short of a clean
-        sweep, and means "add seeds", not "no effect".
+        With n seeds the smallest two-sided p-value the test can return is 2/2^n
+        (0.031 at 6 seeds, 0.002 at 10); `min_attainable_p` reports it alongside
+        each result.
 
         Returns {family: {metric: {...}}} for n_failures, worst_margin, p_fail.
         """
@@ -257,23 +245,15 @@ class ComparisonResult:
 
     def drift_diagnostic(self) -> dict:
         """
-        Did the simulator drift over the session?
+        Spearman correlation between execution order and failures found.
 
-        The failure rate of this simulator depends on how fast the control loop
-        happens to be running, and that changes as containers warm up: the same
-        30 points re-evaluated three times in a row gave 37.9%, 20.7% and 6.9%
-        failures. If a campaign executes one arm and then the other, that drift
-        becomes a systematic advantage for whichever arm went first, and the
-        comparison measures the clock instead of the design.
+        A negative correlation means later runs found fewer failures than earlier
+        ones. The diagnostic needs `run_index`, recorded per run by :meth:`run`, and
+        reports `interleaved` so the reader knows whether the arms were mixed: with
+        arm-major execution the correlation cannot be separated from the arm.
 
-        This looks for it after the fact: Spearman correlation between the order
-        a run was executed in and how many failures it found. A strong negative
-        correlation means the machine got "easier" as the session went on.
-
-        Only meaningful when the campaign recorded run_index (from this version
-        onwards) and ran the arms in a mixed order — with arm-major execution the
-        correlation is confounded with the arm itself, which is precisely the
-        problem it exists to detect.
+        Returns {} when the campaign carries no run order, and sets
+        ``computable=False`` when the failure counts have no variance to correlate.
         """
         from scipy import stats
 
@@ -296,10 +276,8 @@ class ComparisonResult:
         blocks = 1 + sum(1 for a, b in zip(order, order[1:]) if a != b)
         interleaved = blocks > len(set(labels))
 
-        # A nan correlation is NOT the absence of drift: it is the absence of a
-        # measurement. Spearman is undefined when the failure counts have zero
-        # variance (e.g. every run found zero failures), and reporting that as
-        # "no detectable drift" claims a clean bill of health nobody checked.
+        # Spearman is undefined when the failure counts have zero variance
+        # (every run found the same number), which `computable` reports.
         computable = bool(np.isfinite(rho) and np.isfinite(pval))
         return {"spearman_rho": float(rho), "p_value": float(pval),
                 "n_runs": len(idx), "interleaved": bool(interleaved),
@@ -310,8 +288,8 @@ class ComparisonResult:
         """
         Rank the arms by rare-failure yield (see :mod:`pipeline.arm_ranking`).
 
-        Returns None when the campaign has no operational distribution, since
-        rarity is defined against it and there is nothing to rank on otherwise.
+        Returns None when the campaign carries no operational distribution:
+        rarity is defined against it.
         """
         if self.odd_dists is None or self.param_lower is None:
             return None
@@ -326,6 +304,62 @@ class ComparisonResult:
         if not kw:
             self._ranking_cache = rk
         return rk
+
+    @staticmethod
+    def _paired_table_lines(rows: list) -> list:
+        """The per-family table: LHS mean, random mean, wins and p."""
+        width = max([len(r[0]) for r in rows] + [16]) + 2
+        L = [f"   {'family / metric':<{width}}{'LHS':>10}{'random':>10}"
+             f"{'LHS wins':>10}{'p':>8}"]
+        prev_fam = None
+        for name, m, metric in rows:
+            fam = name.split(" / ")[0]
+            if prev_fam is not None and fam != prev_fam:
+                L.append("")
+            prev_fam = fam
+            fmt = "{:.1f}" if metric == "n_failures" else "{:+.3f}"
+            star = ("  **" if m["p_value"] < 0.05 else
+                    "  *" if m["p_value"] < 0.10 else "")
+            L.append(f"   {name:<{width}}"
+                     f"{fmt.format(m['lhs_mean']):>10}"
+                     f"{fmt.format(m['random_mean']):>10}"
+                     f"{str(m['lhs_wins']) + '/' + str(m['n']):>10}"
+                     f"{m['p_value']:>8.3f}{star}")
+        L.append("")
+        return L
+
+    def _drift_lines(self) -> list:
+        """
+        Whether the session drifted, and whether that invalidates the block.
+
+        Drift only biases the comparison when the arms ran in blocks; with a
+        mixed order it inflates the noise instead, which is why the execution
+        order is reported next to the correlation.
+        """
+        dr = self.drift_diagnostic()
+        if not dr:
+            return []
+        tag = ("mixed" if dr["interleaved"] else
+               "ARM-MAJOR — the check below cannot be trusted")
+        L = ["", "   SESSION DRIFT CHECK", f"   execution order: {tag}"]
+        if not dr.get("computable", True):
+            L.append("   failures vs run order: NOT COMPUTABLE — the failure")
+            L.append("   counts have no variance across runs (every run found")
+            L.append("   the same number). Drift is unmeasured here, not absent.")
+            return L
+        L.append(f"   failures vs run order: rho={dr['spearman_rho']:+.2f} "
+                 f"(p={dr['p_value']:.3f}, {dr['n_runs']} runs)")
+        if dr["drift_detected"] and not dr["interleaved"]:
+            L.append("   The machine drifted AND the arms ran in blocks: the")
+            L.append("   comparison above is confounded with execution order.")
+            L.append("   Re-run with order='shuffled' before believing it.")
+        elif dr["drift_detected"]:
+            L.append("   The machine drifted, but the arms were mixed, so the")
+            L.append("   drift hits both designs equally — it inflates the noise,")
+            L.append("   it does not bias the comparison.")
+        else:
+            L.append("   No detectable drift over the session.")
+        return L
 
     def _paired_block(self) -> str:
         """The seed-by-seed LHS vs random table, with its own verdict."""
@@ -350,24 +384,7 @@ class ComparisonResult:
                                       ("n_failures", "failures found"),
                                       ("worst_margin", "worst margin"))
                 if metric in e]
-        width = max([len(r[0]) for r in rows] + [16]) + 2
-        L.append(f"   {'family / metric':<{width}}{'LHS':>10}{'random':>10}"
-                 f"{'LHS wins':>10}{'p':>8}")
-        prev_fam = None
-        for name, m, metric in rows:
-            fam = name.split(" / ")[0]
-            if prev_fam is not None and fam != prev_fam:
-                L.append("")
-            prev_fam = fam
-            fmt = "{:.1f}" if metric == "n_failures" else "{:+.3f}"
-            star = ("  **" if m["p_value"] < 0.05 else
-                    "  *" if m["p_value"] < 0.10 else "")
-            L.append(f"   {name:<{width}}"
-                     f"{fmt.format(m['lhs_mean']):>10}"
-                     f"{fmt.format(m['random_mean']):>10}"
-                     f"{str(m['lhs_wins']) + '/' + str(m['n']):>10}"
-                     f"{m['p_value']:>8.3f}{star}")
-        L.append("")
+        L += self._paired_table_lines(rows)
 
         # The verdict used to read n_failures alone. With zero failures anywhere
         # that metric is constant, every p is 1.0, and the block printed "no
@@ -412,31 +429,7 @@ class ComparisonResult:
             L.append("   label flips on ~20% of the points from simulator noise")
             L.append("   alone, while the margin is a continuous measurement.")
 
-        dr = self.drift_diagnostic()
-        if dr:
-            L.append("")
-            L.append("   SESSION DRIFT CHECK")
-            tag = ("mixed" if dr["interleaved"] else
-                   "ARM-MAJOR — the check below cannot be trusted")
-            L.append(f"   execution order: {tag}")
-            if not dr.get("computable", True):
-                L.append("   failures vs run order: NOT COMPUTABLE — the failure")
-                L.append("   counts have no variance across runs (every run found")
-                L.append("   the same number). Drift is unmeasured here, not absent.")
-                L.append("=" * w)
-                return "\n".join(L)
-            L.append(f"   failures vs run order: rho={dr['spearman_rho']:+.2f} "
-                     f"(p={dr['p_value']:.3f}, {dr['n_runs']} runs)")
-            if dr["drift_detected"] and not dr["interleaved"]:
-                L.append("   The machine drifted AND the arms ran in blocks: the")
-                L.append("   comparison above is confounded with execution order.")
-                L.append("   Re-run with order='shuffled' before believing it.")
-            elif dr["drift_detected"]:
-                L.append("   The machine drifted, but the arms were mixed, so the")
-                L.append("   drift hits both designs equally — it inflates the noise,")
-                L.append("   it does not bias the comparison.")
-            else:
-                L.append("   No detectable drift over the session.")
+        L += self._drift_lines()
         L.append("=" * w)
         return "\n".join(L)
 
@@ -508,11 +501,9 @@ class ComparisonResult:
         Write ``<prefix>.json``, ``<prefix>_arms.csv``, ``<prefix>_regions.csv``
         and ``<prefix>_raw.npz``.
 
-        The .npz holds every evaluated point and its margin, per arm. That file is
-        the expensive part of the experiment — hours of Unity — and the analysis on
-        top of it (clustering radius, localisation threshold, region definitions)
-        is cheap and will want revisiting. Saving only the derived tables would
-        mean re-running the simulator to change a plotting parameter.
+        The .npz holds every evaluated point, its margin and the seed that produced
+        it, per arm, which is what the analysis scripts re-read to recompute the
+        tables without simulating.
         """
         d = os.path.dirname(os.path.abspath(path_prefix))
         if d:
@@ -577,14 +568,6 @@ class ComparisonResult:
 # The harness
 # ─────────────────────────────────────────────────────────────────────────────
 class ModelComparison:
-    """
-    Run a set of arms over a set of seeds and compare their failure regions.
-
-    An "arm" is any object exposing ``label``, ``budget`` and
-    ``run(seed) -> result``, where the result carries ``theta_evaluated``,
-    ``margins``, ``p_fail`` and ``n_evaluations``. Every class in this feature
-    satisfies that, and so does anything you add later.
-    """
 
     def __init__(self, scenario, arms: list, *, seeds=(0,), budget: int = 0,
                  param_lower=None, param_upper=None, eps: float | None = None,
@@ -594,6 +577,13 @@ class ModelComparison:
         # value silently breaks when the dimension changes: in a 9-parameter
         # scenario two random points sit ~1.2 apart, so any small eps declares
         # every failure isolated and the region comparison reports nothing.
+        """
+        Run a set of arms over a set of seeds and compare their failure regions.
+
+        An "arm" is any object exposing ``label``, ``budget`` and
+        ``run(seed) -> result``, where the result carries ``theta_evaluated``,
+        ``margins``, ``p_fail`` and ``n_evaluations``.
+        """
         if isinstance(scenario, str):
             from scenarios import SCENARIOS
             scenario = SCENARIOS[scenario]
@@ -619,22 +609,20 @@ class ModelComparison:
                 odd_samples: int = 8000, param_lower=None, param_upper=None,
                 verbose: bool = True) -> "ModelComparison":
         """
-        The four-arm comparison the feature exists for, at a matched budget:
+        The standard arm set at a matched budget:
 
             active_boundary[lhs]   vs  active_boundary[random]
             cross_entropy[lhs]     vs  cross_entropy[random]
 
-        plus (optionally) plain LHS / plain random sampling as the floor.
+        plus, when ``include_plain``, plain LHS and plain random sampling.
 
-        Budget split for active boundary: a third on the seed design, the rest
-        spread over ``n_iter`` active batches. For cross-entropy the descent can
-        stop early, so its realised budget is <= the target; the report prints
-        the realised count.
+        Budget split for active boundary: a third on the seed design, the rest over
+        ``n_iter`` active batches. The cross-entropy descent can stop early, so its
+        realised budget is <= the target and the report prints the realised count.
 
-        ``pool_size`` and ``odd_samples`` cost no simulations but they are not
-        free in wall-clock: the credible interval draws 200 GP posterior samples
-        at ``odd_samples`` points, which is an O(odd_samples^3) Cholesky. Lower
-        it (2000 is plenty for a synthetic check) when running many arms.
+        ``pool_size`` and ``odd_samples`` cost no simulations, but the credible
+        interval draws 200 GP posterior samples at ``odd_samples`` points, an
+        O(odd_samples^3) Cholesky.
         """
         if isinstance(scenario, str):
             from scenarios import SCENARIOS
@@ -687,7 +675,118 @@ class ModelComparison:
                    param_lower=param_lower, param_upper=param_upper, verbose=verbose)
 
     # ── execution ──────────────────────────────────────────────────────────
+    def _execution_order(self) -> list:
+        """
+        The (arm, seed) pairs in the order they will be simulated.
+
+        "shuffled" permutes them with `order_seed`, "interleaved" runs one seed at a
+        time across the arms, and "sequential" keeps the definition order, i.e. all
+        of one arm before the next.
+        """
+        tasks = [(i, arm, sd) for i, arm in enumerate(self.arms) for sd in self.seeds]
+        if self.order == "shuffled":
+            np.random.default_rng(self.order_seed).shuffle(tasks)
+        elif self.order == "interleaved":
+            tasks.sort(key=lambda t: (self.seeds.index(t[2]), t[0]))
+        return tasks
+
+    @staticmethod
+    def _seed_row(sd, res, mg, fails: int, run_index: int, started: float) -> dict:
+        """
+        What one (arm, seed) run contributes to the campaign record.
+
+        `margin_q05` is the 5th percentile of the run's margins, a continuous
+        measure of how far into the failure region it got; `worst_margin` is the
+        single deepest one.
+
+        `p_fail_usable` is False when the arm's estimator is out of its validity
+        regime at this budget (see rare_event.MIN_DEFENSIVE_SAMPLES): `p_fail` still
+        carries a number, and the ranking excludes it.
+
+        `run_index` and `started_at_s` are what :meth:`drift_diagnostic` reads.
+        """
+        return {
+            "seed": int(sd),
+            "p_fail": float(res.p_fail),
+            "p_fail_usable": bool(getattr(res, "p_fail_usable", True)),
+            "n_defensive": int(getattr(res, "n_defensive", 0)),
+            "ess": float(getattr(res, "ess", float("nan"))),
+            "n_fail_effective": int(getattr(res, "n_fail_effective", 0)),
+            "n_evaluations": int(res.n_evaluations),
+            "n_failures": fails,
+            "worst_margin": float(np.nanmin(mg)) if mg.size else float("nan"),
+            "margin_q05": (float(np.nanpercentile(mg, 5))
+                           if np.isfinite(mg).any() else float("nan")),
+            # Bookkeeping for the drift diagnostic: when this run happened.
+            "run_index": int(run_index),
+            "started_at_s": float(started),
+        }
+
+    @staticmethod
+    def _arm_stats(rows: list, regions, label: str) -> dict:
+        """One arm's aggregates over its seeds."""
+        p = np.array([r["p_fail"] for r in rows], float)
+        f = np.array([r["n_failures"] for r in rows], float)
+        e = np.array([r["n_evaluations"] for r in rows], float)
+        wm = np.array([r["worst_margin"] for r in rows], float)
+        return {
+            "n_seeds": len(rows),
+            "mean_p_fail": float(p.mean()),
+            "std_p_fail": float(p.std(ddof=1)) if len(p) > 1 else 0.0,
+            "mean_failures": float(f.mean()),
+            "std_failures": float(f.std(ddof=1)) if len(f) > 1 else 0.0,
+            "mean_evaluations": float(e.mean()),
+            "worst_margin": float(np.nanmin(wm)) if wm.size else float("nan"),
+            "n_regions": len(regions.discovery.get(label, ())),
+            "n_exclusive_regions": len(regions.exclusive_regions(label)),
+            # False as soon as one seed produced an unusable estimate.
+            "p_fail_usable": bool(all(r.get("p_fail_usable", True) for r in rows)),
+        }
+
+    def _run_all_tasks(self, tasks: list, thr: float) -> tuple:
+        """
+        Simulate every (arm, seed) pair.
+
+        An arm that raises loses that seed only: the exception is recorded in
+        `failed` and the remaining runs continue.
+
+        Returns ``(collected, failed)``.
+        """
+        collected: dict = {}
+        failed: list = []
+        t_start = time.time()
+        for run_index, (_, arm, sd) in enumerate(tasks):
+            label = arm.label
+            if self.verbose:
+                print(f"\n=== {label}  seed={sd}   "
+                      f"[{run_index + 1}/{len(tasks)}] ===", flush=True)
+            started = time.time() - t_start
+            try:
+                res = arm.run(seed=sd)
+            except Exception as exc:
+                failed.append((label, sd, f"{type(exc).__name__}: {exc}"))
+                if self.verbose:
+                    print(f"  !! {type(exc).__name__}: {exc}", flush=True)
+                continue
+            th = np.asarray(res.theta_evaluated, float)
+            mg = np.asarray(res.margins, float)
+            fails = int((mg[np.isfinite(mg)] < thr).sum())
+            collected.setdefault(label, {"theta": [], "margins": [],
+                                         "seeds": [], "rows": []})
+            collected[label]["theta"].append(th)
+            collected[label]["margins"].append(mg)
+            collected[label]["seeds"].append(np.full(len(mg), int(sd), dtype=int))
+            collected[label]["rows"].append(
+                self._seed_row(sd, res, mg, fails, run_index, started))
+        return collected, failed
+
     def run(self) -> ComparisonResult:
+        """
+        Run the whole campaign: every arm on every seed, at a matched budget.
+
+        The result carries the pooled clouds AND the per-seed provenance, which
+        is what makes the paired tests downstream possible.
+        """
         b = self.scenario.param_bounds()
         lower = np.asarray(self.param_lower if self.param_lower is not None
                            else b["lower"], float)
@@ -701,71 +800,9 @@ class ModelComparison:
         clouds: dict = {}
         cloud_seeds: dict = {}
         per_seed: dict = {}
-        failed: list = []
 
-        # Execution ORDER is part of the experiment. Running all of one arm and
-        # then all of the other confounds the comparison with anything that
-        # drifts over the session — and this simulator drifts: the same 30 points
-        # re-evaluated three times in a row gave 37.9%, 20.7%, 6.9% failures, a
-        # monotone decline as the containers warm up. Arm-major order would hand
-        # the first arm a systematic advantage. So the (arm, seed) pairs are
-        # shuffled, which turns any drift into noise shared by every arm.
-        tasks = [(i, arm, sd) for i, arm in enumerate(self.arms) for sd in self.seeds]
-        if self.order == "shuffled":
-            np.random.default_rng(self.order_seed).shuffle(tasks)
-        elif self.order == "interleaved":
-            tasks.sort(key=lambda t: (self.seeds.index(t[2]), t[0]))
-        # "sequential" keeps the definition order (arm-major) — only for
-        # reproducing an older campaign.
-
-        collected: dict = {}
-        t_start = time.time()
-        for run_index, (_, arm, sd) in enumerate(tasks):
-            label = arm.label
-            if self.verbose:
-                print(f"\n=== {label}  seed={sd}   "
-                      f"[{run_index + 1}/{len(tasks)}] ===", flush=True)
-            started = time.time() - t_start
-            try:
-                res = arm.run(seed=sd)
-            except Exception as exc:                     # keep the campaign alive
-                failed.append((label, sd, f"{type(exc).__name__}: {exc}"))
-                if self.verbose:
-                    print(f"  !! {type(exc).__name__}: {exc}", flush=True)
-                continue
-            th = np.asarray(res.theta_evaluated, float)
-            mg = np.asarray(res.margins, float)
-            fails = int((mg[np.isfinite(mg)] < thr).sum())
-            collected.setdefault(label, {"theta": [], "margins": [],
-                                         "seeds": [], "rows": []})
-            collected[label]["theta"].append(th)
-            collected[label]["margins"].append(mg)
-            collected[label]["seeds"].append(np.full(len(mg), int(sd), dtype=int))
-            collected[label]["rows"].append({
-                "seed": int(sd),
-                "p_fail": float(res.p_fail),
-                # Is p_fail a probability estimate at all? Arms whose estimator
-                # degenerates at this budget (see rare_event.MIN_DEFENSIVE_SAMPLES)
-                # still report a number; it just must never be read as one.
-                "p_fail_usable": bool(getattr(res, "p_fail_usable", True)),
-                "n_defensive": int(getattr(res, "n_defensive", 0)),
-                "ess": float(getattr(res, "ess", float("nan"))),
-                "n_fail_effective": int(getattr(res, "n_fail_effective", 0)),
-                "n_evaluations": int(res.n_evaluations),
-                "n_failures": fails,
-                "worst_margin": float(np.nanmin(mg)) if mg.size else float("nan"),
-                # The 5th percentile of the margins this run reached. Far more
-                # stable than either the failure COUNT (a binary label that flips
-                # on ~20% of the points because of simulator noise) or the single
-                # worst margin (an extreme of a noisy sample). It answers "how
-                # deep into the failure region did this design get" on a
-                # continuous scale, where the noise averages instead of flipping.
-                "margin_q05": (float(np.nanpercentile(mg, 5))
-                               if np.isfinite(mg).any() else float("nan")),
-                # Bookkeeping for the drift diagnostic: when this run happened.
-                "run_index": int(run_index),
-                "started_at_s": float(started),
-            })
+        tasks = self._execution_order()
+        collected, failed = self._run_all_tasks(tasks, thr)
 
         for label in [a.label for a in self.arms]:
             c = collected.get(label)
@@ -784,27 +821,8 @@ class ModelComparison:
             dists=dists, eps=self.eps, min_samples=self.min_samples,
         )
 
-        per_arm: dict = {}
-        for label, rows in per_seed.items():
-            p = np.array([r["p_fail"] for r in rows], float)
-            f = np.array([r["n_failures"] for r in rows], float)
-            e = np.array([r["n_evaluations"] for r in rows], float)
-            wm = np.array([r["worst_margin"] for r in rows], float)
-            per_arm[label] = {
-                "n_seeds": len(rows),
-                "mean_p_fail": float(p.mean()),
-                "std_p_fail": float(p.std(ddof=1)) if len(p) > 1 else 0.0,
-                "mean_failures": float(f.mean()),
-                "std_failures": float(f.std(ddof=1)) if len(f) > 1 else 0.0,
-                "mean_evaluations": float(e.mean()),
-                "worst_margin": float(np.nanmin(wm)) if wm.size else float("nan"),
-                "n_regions": len(regions.discovery.get(label, ())),
-                "n_exclusive_regions": len(regions.exclusive_regions(label)),
-                # False as soon as ONE seed produced a degenerate estimate: a
-                # mean over usable and unusable estimates is not usable either.
-                "p_fail_usable": bool(all(r.get("p_fail_usable", True)
-                                          for r in rows)),
-            }
+        per_arm = {label: self._arm_stats(rows, regions, label)
+                   for label, rows in per_seed.items()}
 
         return ComparisonResult(
             arm_labels=list(clouds.keys()),

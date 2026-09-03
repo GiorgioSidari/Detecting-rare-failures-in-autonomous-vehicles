@@ -159,7 +159,8 @@ def compare_one(row: np.ndarray, fn, **kw) -> dict:
     }
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=20, help="scenarios to sample")
@@ -170,6 +171,11 @@ def main() -> int:
     ap.add_argument("--legacy", action="store_true",
                     help="use the old PGBlock geometry (must FAIL the gate)")
     ap.add_argument("--threshold", type=float, default=THRESHOLD_M)
+    return ap
+
+
+def main() -> int:
+    ap = _build_parser()
     args = ap.parse_args()
 
     from scipy.stats.qmc import LatinHypercube, scale as qmc_scale
@@ -184,9 +190,10 @@ def main() -> int:
     print("=" * 74)
     print(" GEOMETRIC PARITY -- does the same theta produce the same road?")
     print("=" * 74)
-    print(f" reference : Udacity Catmull-Rom centreline")
+    print(" reference : Udacity Catmull-Rom centreline")
     print(f" design    : LHS seed={args.seed}, n={args.n}")
-    print(f" threshold : {args.threshold*100:.0f} cm  ({EDGE_MARGIN_M:.0f} m of head/tail excluded)")
+    print(f" threshold : {args.threshold*100:.0f} cm  "
+          f"({EDGE_MARGIN_M:.0f} m of head/tail excluded)")
     if args.legacy:
         print(" mode      : LEGACY (PGBlock) -- FAILURE expected")
     print()
@@ -221,12 +228,12 @@ def main() -> int:
         print(f" {name:<12} {'OK ' if ok else 'FALLITO'}")
         print(f"   scostamento mean_dev   {mean_dev*100:8.3f} cm")
         print(f"   scostamento highest {worst*100:8.2f} cm   (threshold {args.threshold*100:.0f})")
-        print(f"   lunghezza got/ref   {rap.mean():8.3f}x   range [{rap.min():.2f}, {rap.max():.2f}]")
+        print(f"   length got/ref     {rap.mean():8.3f}x   range [{rap.min():.2f}, {rap.max():.2f}]")
         if not ok:
             exit_code = 1
-            print(f"   -> the roads DIVERGE. A cross-simulator comparison on these")
-            print(f"      backends would correlate different scenarios: the numbers it")
-            print(f"      produces (Spearman, Jaccard) are not interpretable.")
+            print("   -> the roads DIVERGE. A cross-simulator comparison on these")
+            print("      backends would correlate different scenarios: the numbers it")
+            print("      produces (Spearman, Jaccard) are not interpretable.")
         print()
 
     print("=" * 74)

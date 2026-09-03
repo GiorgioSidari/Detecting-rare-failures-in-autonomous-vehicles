@@ -1,32 +1,19 @@
 #!/usr/bin/env python3
 """
-How deterministic is the simulator? Evaluate the SAME points several times.
+Repeatability check: simulate the SAME points several times and measure the
+spread.
 
-Why this exists. Every comparison in this project pairs arms by seed and assumes
-that a seed fixes the experiment. It does not: the seed fixes which parameter
-points get simulated, but the simulator itself is stochastic — the control loop
-is not synchronous, so the same road driven twice does not produce the same
-trajectory. Running the identical campaign twice has already produced 4 failures
-out of 37 one day and 0 out of 37 the next.
+The script draws `--n` parameter points once and simulates each of them
+`--repeats` times, then reports:
 
-That matters for how the results are read:
+  P(fail) per repeat     the failure rate of each repetition over the same
+                         points
+  verdict flips          points that failed in one repetition and passed in
+                         another
+  margin spread          per-point standard deviation and range of the QoI
 
-  * if the noise is small, seed-to-seed variation really is sampling variation
-    and adding seeds buys statistical power as expected;
-  * if the noise is large, a good part of what looks like "this design found more
-    failures" is the simulator rolling dice, and the fix is not more seeds but
-    REPEATING each point and averaging — a different experiment, and one that
-    costs R times as much per point.
-
-So measure it before spending hours on a campaign whose noise floor is unknown.
-
-The script draws n points once and simulates them R times. What it reports:
-
-  P(fail) per repeat     how much the headline number moves on identical input
-  verdict flips          points that failed in one repeat and passed in another —
-                         the honest measure of how binary the noise is
-  margin spread          per-point standard deviation and range of the QoI, which
-                         says whether the noise is small jitter or a coin flip
+With `--csv` it also writes one row per (point, repetition) with the parameters
+and the resulting margin.
 
 Usage:
     python scripts/check_repeatability.py --n 30 --repeats 3 \
@@ -34,7 +21,7 @@ Usage:
     python scripts/check_repeatability.py --n 30 --repeats 3 --workers 1
     python scripts/check_repeatability.py --n 40 --repeats 5 --csv results/repeat.csv
 
-Cost is n x repeats simulations: 30 x 3 is about 5 minutes on 4 workers.
+Cost is n x repeats simulations.
 """
 from __future__ import annotations
 
@@ -45,12 +32,16 @@ import time
 
 import numpy as np
 
+from pipeline.odd_presets import add_odd_args, resolve_bounds
+from pipeline.samplers import get_sampler
+
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description="Measure simulator repeatability on a fixed set of points.")
     ap.add_argument("--scenario", default="lane_keeping")
@@ -63,14 +54,17 @@ def main() -> None:
                     help="parallel containers (default: NUM_WORKERS or 4)")
     ap.add_argument("--csv", default=None, help="write the per-point margins here")
 
-    from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.workers is not None:
         os.environ["NUM_WORKERS"] = str(args.workers)
 
-    from pipeline.samplers import get_sampler
     from scenarios import SCENARIOS
 
     sc = SCENARIOS[args.scenario]

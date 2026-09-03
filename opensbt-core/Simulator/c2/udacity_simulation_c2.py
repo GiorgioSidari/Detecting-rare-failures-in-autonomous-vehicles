@@ -1,23 +1,23 @@
 """
-Udacity simulator for the C2 arm -- a subclass, not a modification.
+Udacity simulator for the state-based arm: a subclass of `UdacitySimulator`.
 
-It reuses `UdacitySimulator` for everything Unity-related (process startup, gym
-env, road generation) and overrides only `simulate()`, because the original loop
-does not pass the agent the information the state-based controller needs:
+`__init__` and everything Unity-related (process startup, gym environment, road
+generation) are inherited. Only `simulate()` is overridden, so that the agent
+receives, at each step, the three items the inherited loop does not pass:
 
-  * `pos`  -- the position, to project onto the centreline;
-  * the run's centreline, set at reset;
-  * `dt`   -- the real time step. On Udacity the control rate is NOT
-             configurable: it depends on load and on the number of workers
-             (measured: 20.8 Hz with 1 container, 8.5 Hz with 4). The shared
-             controller's steering rate limiter is in units per second, so
-             without the real `dt` its responsiveness would change with how the
-             campaign is launched -- and the difference would be charged to the
-             simulator.
+  * `pos` -- the vehicle position, projected onto the centreline by the agent;
+  * the run's centreline, stored at reset;
+  * `dt` -- the measured time step. Udacity's control rate is not configurable
+    and varies with load and worker count (measured: 20.8 Hz with 1 container,
+    8.5 Hz with 4), while the shared driver's steering rate limit is expressed
+    in units per second, so it needs the actual `dt` to produce the same
+    per-step bound.
 
-The rest of the contract is identical: same `UdacitySimulationOutput`, same
-termination conditions, same statistics. The client cannot tell the two arms
-apart.
+The override keeps the rest of the contract: the same `UdacitySimulationOutput`,
+the same termination conditions and the same statistics as the inherited loop.
+
+Helpers: `_episode_budget` computes the episode horizon, `_drive` runs the
+step loop, `_log_diagnostics` prints the per-run summary.
 """
 from __future__ import annotations
 
@@ -45,13 +45,13 @@ from .state_based_agent import StateBasedAgent
 
 
 class UdacitySimulatorC2(UdacitySimulator):
-    """Udacity simulator running the shared state-based controller."""
 
     def __init__(self) -> None:
         # `super().__init__()` is deliberately not called: it would build the
         # SupervisedAgent, i.e. load TensorFlow and the DNN weights -- 600 MB and
         # several seconds, for an agent that would then be thrown away. Only the
         # part that is needed is replicated: the Unity environment.
+        """Udacity simulator running the shared state-based controller."""
         from ..lanekeeping.config import UDACITY_EXE_PATH
         from ..lanekeeping.udacity.env.udacity_gym_env import UdacityGymEnv_RoadGen
         from ..shared.driver import LateralFeedbackDriver
@@ -70,7 +70,7 @@ class UdacitySimulatorC2(UdacitySimulator):
             driver=driver,
             steering_sign=STEERING_SIGN,
         )
-        print(f"[C2] braccio state-based | speed_scale={SPEED_SCALE} "
+        print(f"[C2] state-based arm | speed_scale={SPEED_SCALE} "
               f"| steering_sign={STEERING_SIGN:+.0f} "
               f"| max_steer_rate={driver.max_steer_rate} u/s "
               f"| obs_latency={OBS_LATENCY} obs_lag_tau={OBS_LAG_TAU} "
@@ -78,74 +78,62 @@ class UdacitySimulatorC2(UdacitySimulator):
 
         self.env = UdacityGymEnv_RoadGen(seed=1, exe_path=UDACITY_EXE_PATH)
 
-    def simulate(self, simulator_config: UdacitySimulatorConfig) -> UdacitySimulationOutput:
-        self.agent.setSpeedLimits(minSpeed=simulator_config.minSpeed,
-                                  maxSpeed=simulator_config.maxSpeed)
+    def _episode_budget(self, simulator_config, road) -> float:
+        """
+        Seconds granted to this scenario, derived from the road it must cover.
 
-        test_generator = CustomRoadGenerator(
-            map_size=simulator_config.map_size,
-            num_control_nodes=len(simulator_config.angles),
-            seg_length=simulator_config.segLength)
+        `simulator_config.maxTime` is a global constant in WALL CLOCK seconds,
+        and it fails in two measured ways:
 
-        simulationOutput = UdacitySimulationOutput()
+          1. it is not enough. At speed_scale=0.42 the target speed is ~6.25 m/s
+             and the roads are ~203 m: that needs ~32 s, while maxTime grants
+             30. The car covered ~92% of the track and `angle_5` was almost
+             never reached.
 
-        road: Road = test_generator.generate(
-            starting_pos=simulator_config.initial_position,
-            angles=simulator_config.angles,
-            simulator_name=UDACITY_SIM_NAME)
+          2. being wall clock, the portion of road covered depends on MACHINE
+             LOAD: at 20.8 Hz (1 worker) 624 decisions fit in 30 s, at 8.5 Hz
+             (4 workers) only 255. The same scenario covers two different
+             portions depending on how many containers are running.
 
-        simulationOutput.road = road.get_concrete_representation(to_plot=True)
-        waypoints: str = road.get_string_repr()
-
-        obs = self.env.reset(skip_generation=False, track_string=waypoints)
-
-        # The centreline is the SAME polyline handed to Unity: the two backends
-        # drive the same road by construction, not by resemblance.
-        self.agent.set_road([(p.x, p.y) for p in road.road_points])
-
-        speed: float = 0.0
-        pos = (road.road_points[0].x, road.road_points[0].y, 0.0)
-        xte_raw: float = 0.0
-
-        # -- Episode horizon ---------------------------------------------------
-        # `simulator_config.maxTime` is a global constant in WALL CLOCK seconds.
-        # Two problems, both measured:
-        #
-        #  1. it is not enough. At speed_scale=0.42 the target speed is ~6.25 m/s
-        #     and the roads are ~203 m: that needs ~32 s, while maxTime grants
-        #     30. The car therefore covered ~92% of the track (less in practice,
-        #     because the target speed is not held for the whole trip), and
-        #     `angle_5` was almost never reached.
-        #
-        #  2. being wall clock, the portion of road covered depends on MACHINE
-        #     LOAD: at 20.8 Hz (1 worker) 624 decisions fit in 30 s, at 8.5 Hz
-        #     (4 workers) only 255. The same scenario covers two different
-        #     portions depending on how many containers are running.
-        #
-        # The budget here is derived from the scenario with the same rule
-        # MetaDrive uses (`scenarios/common/episode_budget.py`, vendored into
-        # `Simulator/shared/`), so the backends share the horizon as well as the
-        # geometry. It is still wall clock -- on Unity simulated time runs in
-        # real time -- but it is no longer a blind constant.
-        #
-        # The NORMAL exit is still `agent.reached_end`: this is only the cap.
+        The budget is therefore derived from the scenario with the same rule
+        MetaDrive uses (`scenarios/common/episode_budget.py`, vendored into
+        `Simulator/shared/`), so the backends share the horizon as well as the
+        geometry. It is still wall clock -- on Unity simulated time runs in real
+        time -- but it is no longer a blind constant, and the NORMAL exit
+        remains `agent.reached_end`: this is only the cap.
+        """
         try:
             from ..shared.driver import target_speed
-            from ..shared.episode_budget import (
-                budget_seconds, polyline_length,
-            )
+            from ..shared.episode_budget import budget_seconds, polyline_length
 
             # The same target speed the controller chases: the budget must match
             # the actual speed, not a nominal one.
-            _v = target_speed(simulator_config.minSpeed, simulator_config.maxSpeed,
-                              SPEED_SCALE)
-            _pts = [(p.x, p.y) for p in road.road_points]
-            max_time = budget_seconds(polyline_length(_pts), _v)
-        except Exception as e:                       # degenerate geometry, broken import
+            v = target_speed(simulator_config.minSpeed, simulator_config.maxSpeed,
+                             SPEED_SCALE)
+            pts = [(p.x, p.y) for p in road.road_points]
+            return budget_seconds(polyline_length(pts), v)
+        except Exception as e:            # degenerate geometry, broken import
             max_time = float(simulator_config.maxTime)
             print(f"[C2] per-scenario budget not computable ({e}); "
                   f"falling back to maxTime={max_time}s", flush=True)
+            return max_time
 
+    def _drive(self, simulator_config, simulationOutput, obs, road,
+               max_time: float) -> tuple:
+        """
+        Drive the episode, recording one row per control decision.
+
+        `dt` is measured between two consecutive decisions -- the real time
+        elapsed between commands applied to the vehicle, which on Udacity varies
+        with load (20.8 Hz with 1 worker, 8.5 Hz with 4) and which the shared
+        controller needs to convert its per-second limits.
+
+        Returns ``(elapsedTime, iterations, predictSeconds, stepSeconds)``.
+        """
+        speed: float = 0.0
+        pos = (road.road_points[0].x, road.road_points[0].y, 0.0)
+        xte_raw: float = 0.0
+        last_decision_t = None
         done_flag = False
         # dt measured between two consecutive decisions: the real time elapsed
         # between commands applied to the vehicle, which on Udacity varies with
@@ -201,7 +189,56 @@ class UdacitySimulatorC2(UdacitySimulator):
 
             iterations += 1
 
-        elapsedTime = time.time() - loop_start
+        return (time.time() - loop_start, iterations, predictSeconds,
+                stepSeconds)
+
+    def _log_diagnostics(self, iterations: int, elapsedTime: float) -> None:
+        """
+        Tell apart two faults with the same symptom (the car always leaves).
+
+        Signs agreeing with Unity's `cte` plus a small mismatch means the
+        geometry is right and the STEERING is inverted; disagreeing signs or a
+        large mismatch mean the geometry itself is wrong, and flipping the
+        steering would fix nothing.
+        """
+        tot = self.agent.n_sign_agree + self.agent.n_sign_disagree
+        agreeing = (self.agent.n_sign_agree / tot * 100.0) if tot else float("nan")
+        print(f"[C2] xte_mismatch_max={self.agent.last_cte_mismatch:.3f} m | "
+              f"sign agrees with Unity cte={agreeing:.0f}% ({tot} samples) | "
+              f"reached_end={self.agent.reached_end} | step={iterations} | "
+              f"{iterations / max(elapsedTime, 1e-9):.1f} Hz", flush=True)
+
+    def simulate(self, simulator_config: UdacitySimulatorConfig) -> UdacitySimulationOutput:
+        self.agent.setSpeedLimits(minSpeed=simulator_config.minSpeed,
+                                  maxSpeed=simulator_config.maxSpeed)
+
+        test_generator = CustomRoadGenerator(
+            map_size=simulator_config.map_size,
+            num_control_nodes=len(simulator_config.angles),
+            seg_length=simulator_config.segLength)
+
+        simulationOutput = UdacitySimulationOutput()
+
+        road: Road = test_generator.generate(
+            starting_pos=simulator_config.initial_position,
+            angles=simulator_config.angles,
+            simulator_name=UDACITY_SIM_NAME)
+
+        simulationOutput.road = road.get_concrete_representation(to_plot=True)
+        waypoints: str = road.get_string_repr()
+
+        obs = self.env.reset(skip_generation=False, track_string=waypoints)
+
+        # The centreline is the SAME polyline handed to Unity: the two backends
+        # drive the same road by construction, not by resemblance.
+        self.agent.set_road([(p.x, p.y) for p in road.road_points])
+
+        max_time = self._episode_budget(simulator_config, road)
+
+        (elapsedTime, iterations, predictSeconds,
+         stepSeconds) = self._drive(simulator_config, simulationOutput,
+                                    obs, road, max_time)
+
         self.env.reset(skip_generation=False, track_string=waypoints)
 
         simulationOutput.elapsedTime = elapsedTime
@@ -209,14 +246,6 @@ class UdacitySimulatorC2(UdacitySimulator):
         simulationOutput.predictSeconds = predictSeconds
         simulationOutput.stepSeconds = stepSeconds
 
-        # Diagnostics: tells apart two faults with the same symptom.
-        #   signs agree + small mismatch -> geometry OK, steering inverted
-        #   segni discordi o mismatch grande  -> geometria sbagliata
-        tot = self.agent.n_sign_agree + self.agent.n_sign_disagree
-        agreeing = (self.agent.n_sign_agree / tot * 100.0) if tot else float("nan")
-        print(f"[C2] xte_mismatch_max={self.agent.last_cte_mismatch:.3f} m | "
-              f"sign agrees with Unity cte={agreeing:.0f}% ({tot} samples) | "
-              f"reached_end={self.agent.reached_end} | step={iterations} | "
-              f"{iterations / max(elapsedTime, 1e-9):.1f} Hz", flush=True)
+        self._log_diagnostics(iterations, elapsedTime)
 
         return simulationOutput

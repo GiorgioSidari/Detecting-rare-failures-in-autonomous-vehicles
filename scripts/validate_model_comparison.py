@@ -1,34 +1,21 @@
 #!/usr/bin/env python3
 """
-Docker-free validation of the LHS-vs-random-search machinery.
+Docker-free validation of the search machinery on a synthetic scenario.
 
-Runs on a SYNTHETIC scenario whose failure regions are known analytically, so
-every number printed here can be checked against ground truth — and, unlike the
-Unity runs, it takes seconds instead of hours.
+The scenario used here has failure regions defined analytically, so the script
+runs in seconds and every printed number can be checked against ground truth.
 
-Part 1 — design-level detection rate (no simulation at all)
-    For failure regions defined by 1, 2 and 4 parameters, measure over many
-    replications how often a design of n points lands inside the region, LHS vs
-    random. This isolates the sampling design from everything else and shows
-    exactly where stratification pays and where it does not:
+Part 1 -- design-level detection rate (no simulation)
+    For failure regions defined by 1, 2 and 4 parameters, the script repeats
+    `--reps` replications in which it draws a design of n points (LHS and
+    random) and records whether any point lands inside the region. It prints the
+    detection rate of each design for each region dimensionality.
 
-      * a region driven by ONE axis: LHS fills every stratum of that axis, so a
-        region a stratum or two wide is hit far more reliably than by random
-        search, which leaves ~37% of the strata empty — the largest gap;
-      * a region needing TWO axes to conspire: the guarantee is marginal, not
-        joint, so the advantage shrinks to a few percent;
-      * a region needing FOUR: the two designs are essentially tied.
-
-    Read this honestly: LHS is not uniformly better, and this script is built to
-    show that rather than hide it. Stratification buys reliable coverage of each
-    parameter's own range, which is what matters when a single dominant
-    parameter (a sharp angle, a speed band) drives the failure.
-
-Part 2 — end-to-end comparison
-    Runs the full ModelComparison harness (active boundary x {lhs, random},
-    cross-entropy x {lhs, random}, plain sampling x {lhs, random}) on a
-    two-region synthetic scenario and prints the failure-region report, with the
-    probability that a blind draw hits each region.
+Part 2 -- end-to-end comparison
+    Runs the full `ModelComparison` harness (active boundary, cross-entropy and
+    plain sampling, each crossed with the lhs and random designs) on a
+    two-region synthetic scenario and prints the failure-region report together
+    with the probability that a blind draw hits each region.
 
 Usage:
     python scripts/validate_model_comparison.py                  # ~2 min
@@ -36,7 +23,7 @@ Usage:
     python scripts/validate_model_comparison.py --reps 500 --budget 80 --seeds 0 1 2
 
 Runtime is dominated by the Gaussian-process fits of the active-boundary arms
-(~10 s per arm per seed); the simulations themselves are free here.
+(~10 s per arm per seed); the synthetic simulations themselves are immediate.
 """
 from __future__ import annotations
 
@@ -199,7 +186,7 @@ def end_to_end(budget: int, seeds: list, out: str | None) -> None:
             print(f"[saved] {f}")
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Docker-free validation of the comparison.")
     ap.add_argument("--n", type=int, default=64, help="design size for part 1")
     ap.add_argument("--reps", type=int, default=400, help="replications for part 1")
@@ -208,6 +195,11 @@ def main() -> None:
     ap.add_argument("--skip-part1", action="store_true")
     ap.add_argument("--skip-part2", action="store_true")
     ap.add_argument("--out", default=None, help="path prefix for JSON/CSV output")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     from sklearn.exceptions import ConvergenceWarning

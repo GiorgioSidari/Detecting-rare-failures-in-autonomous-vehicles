@@ -28,7 +28,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scenarios import SCENARIOS
-from pipeline.active_boundary import run_active_boundary, _build_gp, _p_fail
+from pipeline.active_boundary import run_active_boundary, build_gp, failure_probability
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
@@ -66,13 +66,13 @@ def surrogate_p(theta_tr, y_tr, lower, upper, odd_pts, thr) -> float:
     """GP-surrogate P(failure): fit on (theta, margin), integrate P(fail|theta)
     over ODD points (model-only, no simulation)."""
     span = np.where((upper - lower) > 0, upper - lower, 1.0)
-    gp = _build_gp(theta_tr.shape[1])
+    gp = build_gp(theta_tr.shape[1])
     gp.fit((theta_tr - lower) / span, y_tr)
     mu, sig = gp.predict((odd_pts - lower) / span, return_std=True)
-    return float(np.mean(_p_fail(mu, sig, thr)))
+    return float(np.mean(failure_probability(mu, sig, thr)))
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="lane_keeping")
     ap.add_argument("--n-bf", type=int, default=200, help="brute-force MC simulations")
@@ -80,6 +80,11 @@ def main() -> None:
     ap.add_argument("--batch", type=int, default=12)
     ap.add_argument("--n-iter", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     sc = SCENARIOS[args.scenario]

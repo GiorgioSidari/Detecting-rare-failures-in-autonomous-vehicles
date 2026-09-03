@@ -1,35 +1,22 @@
 """
-Episode horizon: a per-scenario budget instead of a constant.
+Tests for the per-scenario episode horizon of
+`scenarios/common/episode_budget.py`.
 
-Cosa era rotto
---------------
-With a fixed `max_steps` the horizon was constant in STEPS, but what matters is
-how much ROAD is covered, and that depends on the scenario's speed and on the
-backend's control rate. Measured on the 60-point LHS design:
+They cover:
 
-    MetaDrive  scale 0.3625, 10.0 Hz, 300 steps -> 30 s -> ~80% of the road
-    Udacity    scale 0.42,   19.5 Hz, 584 steps -> 30 s -> ~92% of the road
-
-The two backends drove DIFFERENT portions of the same track, and `angle_5` was
-almost never reached -- which alone explains why the diagnostics attributed to
-it only 33-43% of the influence of the strongest angle.
-
-After the fix, coverage is a uniform 95% across all scenarios (the residual 5%
-is MetaDrive's `arrive_dest` tolerance), against the 63-95% spread before.
+  * `budget_seconds` -- the formula
+    `clamp(length / target_speed * MARGIN, MIN_SECONDS, MAX_SECONDS)`, including
+    both clamps and the monotonic behaviour in length and target speed;
+  * `budget_steps` -- the conversion to steps for a given `control_hz`, and its
+    rounding up;
+  * that two backends running at different control rates get the same horizon in
+    simulated seconds, and therefore step counts in the ratio of their rates.
 """
 from __future__ import annotations
 
 import math
-import os
-import sys
 
-import numpy as np
 import pytest
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-for _p in (_REPO_ROOT, os.path.join(_REPO_ROOT, "opensbt-core")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from scenarios.common.episode_budget import (                       # noqa: E402
     MARGIN, MAX_SECONDS, MIN_SECONDS,
@@ -142,12 +129,10 @@ def test_real_budget_on_the_design():
 
 def test_metadrive_scenario_uses_the_budget():
     """
-    The budget must reach both the loop and MetaDrive's `horizon`.
-
-    If only the loop used it, MetaDrive would still truncate at the horizon with
-    `truncated=True` and the budget would have no effect -- the bug that was
-    observed (episodes still stuck at 300 steps with a budget of 561).
+    The scenario passes the same budget to the step loop and to MetaDrive's
+    `horizon`, so the two truncation limits agree.
     """
+    pytest.importorskip("metadrive")
     from scenarios.lane_keeping_md.config import LaneKeepingMetaDriveScenario as S
 
     sc = S(speed_scale=0.3625, max_steps=300)
@@ -155,13 +140,15 @@ def test_metadrive_scenario_uses_the_budget():
 
     seen = {}
 
-    def finto(row, *, decision_repeat, physics_world_step_size, max_steps, seed=0):
+    def fake_make_online_env(row, *, decision_repeat, physics_world_step_size, max_steps, seed=0):
         seen["max_steps"] = max_steps
         raise RuntimeError("stop")            # knowing what it was passed is enough
 
-    import scenarios.lane_keeping_md.scenario_map as sm
-    vero = sm.make_online_env
-    sm.make_online_env = finto
+    # config.py binds the name at import time (`from ... import make_online_env`),
+    # so the patch has to replace it in config, not in scenario_map.
+    import scenarios.lane_keeping_md.config as cfg
+    real_make_online_env = cfg.make_online_env
+    cfg.make_online_env = fake_make_online_env
     try:
         from scenarios.lane_keeping_md.map_builder import build_scenario_spec
         from scipy.stats.qmc import LatinHypercube, scale as qmc_scale
@@ -173,7 +160,7 @@ def test_metadrive_scenario_uses_the_budget():
         with pytest.raises(RuntimeError):
             sc._make_env(build_scenario_spec(row), 0, row=row)
     finally:
-        sm.make_online_env = vero
+        cfg.make_online_env = real_make_online_env
 
     assert seen["max_steps"] > 300
     assert seen["max_steps"] == sc._budget_steps, (

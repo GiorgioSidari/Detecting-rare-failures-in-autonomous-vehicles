@@ -1,23 +1,18 @@
 """
-Tests for how the C2 arm's containers start up.
+Tests on the compose file that starts the state-based arm's containers, and on
+`gen_c2_compose.py` which generates it.
 
-Why this file exists
--------------------------
-The C2 compose changes the entrypoint to point at `Simulator.c2.server` instead
-of `Simulator.SimulatorServer`. But in Docker `command:` **replaces the whole
-CMD of the Dockerfile**, and that CMD does not merely launch uvicorn: it first
-starts Xvfb and exports `DISPLAY=:99`.
+The compose file sets `command:` to launch `Simulator.c2.server`. A `command:`
+replaces the Dockerfile CMD entirely, and that CMD also starts Xvfb and exports
+`DISPLAY=:99`, which Unity requires even headless: without it the container
+comes up, uvicorn answers, and the Unity process waits indefinitely for a GL
+context without raising or exiting.
 
-Unity is a graphical application and demands a display even headless. Without
-Xvfb the container starts, uvicorn answers, the Unity process is launched -- and
-then sits forever on `sleep...and repeat to connect`, because Unity never gets a
-GL context and never connects to the socket.io server on 4567. No exception, no
-exit code: just a hang. It is a failure mode that costs hours, so it is worth a
-test.
-
-What it does NOT check: that the containers work. That needs Docker. Here only
-the consistency between the entrypoint and the Dockerfile is checked -- i.e. the
-class of errors that can be caught statically.
+The tests parse the compose file and the Dockerfile and check that the declared
+command starts Xvfb, exports `DISPLAY` without letting the host interpolate it,
+points at the state-based server, keeps the whole bootstrap of the original CMD,
+and that re-running the generator reproduces the committed file. No container is
+started.
 """
 from __future__ import annotations
 

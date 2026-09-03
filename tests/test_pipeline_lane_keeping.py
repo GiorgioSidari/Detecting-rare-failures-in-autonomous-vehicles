@@ -136,7 +136,7 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
     ax.axhline( MAX_XTE, color="black", linestyle="--", linewidth=1, label=f"+MAX_XTE ({MAX_XTE}m)")
     ax.axhline(-MAX_XTE, color="black", linestyle="--", linewidth=1)
     ax.axhline(0, color="gray", linestyle=":", linewidth=0.6)
-    ax.set_xlabel("Step simulazione")
+    ax.set_xlabel("Simulation step")
     ax.set_ylabel("XTE (m)")
     legend_patches = [
         mpatches.Patch(color=COLOR_SAFE,    label="safe"),
@@ -173,9 +173,9 @@ def make_plots(traj: np.ndarray, qoi: np.ndarray, failures: np.ndarray,
     ax.set_title("QoI components per sample", fontsize=11)
     x   = np.arange(N)
     w   = 0.25
-    b1  = ax.bar(x - w, m1, w, label="M1 (XTE margin × 0.6)",      color="#3498db", alpha=0.85)
-    b2  = ax.bar(x,     m2, w, label="M2 (sterzo peak dev × 0.2)",  color="#f39c12", alpha=0.85)
-    b3  = ax.bar(x + w, m3, w, label="M3 (early approach × 0.2)",   color="#9b59b6", alpha=0.85)
+    ax.bar(x - w, m1, w, label="M1 (XTE margin x 0.6)",         color="#3498db", alpha=0.85)
+    ax.bar(x,     m2, w, label="M2 (steering peak dev x 0.2)",  color="#f39c12", alpha=0.85)
+    ax.bar(x + w, m3, w, label="M3 (early approach x 0.2)",     color="#9b59b6", alpha=0.85)
     ax.axhline(0, color="black", linewidth=0.8)
 
     # Highlight the failures with a background
@@ -235,7 +235,7 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
     print(f"\n  {len(bounds['names'])} parametri campionati:")
     for name, lo, hi in zip(bounds["names"], bounds["lower"], bounds["upper"]):
         print(f"    {name:<22}  [{lo:.1f}, {hi:.1f}]")
-    print(f"\n  Sample table (rows = runs, columns = parameters):")
+    print("\n  Sample table (rows = runs, columns = parameters):")
     header = "  #    " + "  ".join(f"{n[:8]:>8}" for n in bounds["names"])
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -243,10 +243,10 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
         print(f"  {i+1:2d}   " + "  ".join(f"{v:8.2f}" for v in row))
 
     # ── 2. Simulazioni ────────────────────────────────────────────────────────
-    print_section(f"STEP 2 — Simulazioni Docker parallelizzate  (http://localhost:8000)")
+    print_section("STEP 2 — Simulazioni Docker parallelizzate  (http://localhost:8000)")
     print(f"\n  Fase 1 — Submit {n_samples} job al SimulatorServer...")
     print(f"  Fase 2 — Poll parallelo (ThreadPoolExecutor, max_workers={n_samples})")
-    print(f"\n  Attendi completamento...\n")
+    print("\n  Attendi completamento...\n")
 
     t0      = time.time()
     traj    = sc.run_simulation(params, verbose=True)   # prints each job as it finishes
@@ -289,7 +289,7 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
     flat_c = flat - flat.mean(axis=0)
     _, S, _ = np.linalg.svd(flat_c, full_matrices=False)
     cum_var = np.cumsum(S**2) / np.sum(S**2)
-    print(f"\n  Varianza spiegata per modo:")
+    print("\n  Varianza spiegata per modo:")
     for k in range(min(pod.nModes, 6)):
         bar = "█" * int(cum_var[k] * 30)
         print(f"    modo {k+1:2d}: {cum_var[k]*100:5.1f}%  {bar}")
@@ -324,11 +324,11 @@ def main(n_samples: int = 50, seed: int = 42, rare_fraction: float = 0.30):
             rare_codes = pod_codes[rare_mask]
             dist = np.linalg.norm(safe_codes.mean(axis=0) - rare_codes.mean(axis=0))
             print(f"\n  Distanza POD  safe_centroid → rare_centroid: {dist:.4f}")
-            print(f"  (a high value = the rare failures occupy a different part of the space)")
+            print("  (a high value = the rare failures occupy a different part of the space)")
 
         # Parametri critici nei rare failures
         seg_vals = [params[idx, 7] for idx in rare_idx]
-        print(f"\n  ⚠  Parametro critico rilevato: segment_length")
+        print("\n  ⚠  Parametro critico rilevato: segment_length")
         print(f"     Rare failures — seg: {[f'{v:.0f}m' for v in seg_vals]}")
         safe_seg = params[~failures.astype(bool), 7]
         print(f"     Safe runs      — seg media: {safe_seg.mean():.1f}m  "

@@ -1,55 +1,28 @@
 #!/usr/bin/env python3
 """
-Is the scenario physically drivable? -- an ODD diagnostic.
+ODD drivability diagnostic: how much of the scenario space is above the grip
+limit.
 
-The question it answers
------------------------
-When a backend fails in 100% of cases there are two very different explanations,
-with opposite consequences for the report:
-
-  * **the controller is weak**  -> a result about the controller, improved by
-                                   tuning the gains or changing the control law;
-  * **the ODD is physically impossible** -> no controller could manage, and the
-                                   "failure" is not a defect of the system under
-                                   test but of the scenario space.
-
-The two are told apart by a calculation, not by conjecture: the lateral
-acceleration required to drive the tightest curve at the target speed.
+The script draws `--n` LHS samples from the ODD, and for each one computes the
+tightest curve radius `R` of the generated road and the target speed `v` at
+each `speed_scale` in `--scales`. From those it derives the lateral
+acceleration the curve demands,
 
     a_lat = v^2 / R
 
-Above the grip limit (~0.8g on dry asphalt) the vehicle slides regardless, by
-definition.
+and compares it with the grip limit `mu * g` (`--mu`, default 0.8).
 
-Result measured on this ODD (seed 42, 20 LHS samples)
------------------------------------------------------
-    speed_scale   median a_lat   over the limit   observed failures
-      1.0000          1.21 g           70%             100%
-      0.1766          0.04 g            0%            15.8%
+Printed output:
 
-How to read it, in two parts:
+  * a header with the sample count, the grip limit, the minimum and median
+    curve radius and the target-speed range at `speed_scale = 1`;
+  * one row per `speed_scale`: median speed, median and maximum `a_lat` in g,
+    and the share of samples whose `a_lat` exceeds the limit ("over");
+  * with `--suggest-cap`, a second block computing the per-scenario speed cap
+    `v_max = sqrt(0.6 * mu * g * R)`, its range, the ratio `v_max / v_target`
+    and the global `speed_scale` equivalent to the smallest of those ratios.
 
-1. **At `speed_scale = 1.0`, 70% of the space is over the grip limit.** The 100%
-   failure rate measured at the start on Udacity and MetaDrive is therefore
-   largely PHYSICS. Reporting it as "the controller always fails" would be
-   misleading: much of that space is not drivable by anyone.
-
-2. **At the calibrated point the maximum acceleration is 0.095 g.** At that
-   level physics is no longer a constraint -- it is a parking manoeuvre. So the
-   residual 15.8% of failures **cannot** be physics: it is entirely the
-   controller's shortcoming.
-
-Methodological consequence
---------------------------
-Calibrating with speed alone moves the experiment from one regime to another
-without flagging it. At the calibrated point one measures the controller's
-weakness in conditions with no physical challenge; at scale=1 one mostly
-measures physical impossibility. Neither is the interesting regime, which would
-be: drivable but demanding scenarios.
-
-The structural fix is to constrain the speed PER SCENARIO from the curvature
-radius (`--suggest-cap`), so every sample sits below the grip limit by
-construction and failures are always attributable to control.
+The script runs no simulation: it only evaluates road geometry and speeds.
 
 Usage
 -----
@@ -71,7 +44,8 @@ if _PROJECT_ROOT not in sys.path:
 G = 9.81
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=20, help="LHS samples")
@@ -83,6 +57,11 @@ def main() -> int:
                     default=[1.0, 0.5, 0.3625, 0.2562, 0.1766, 0.15])
     ap.add_argument("--suggest-cap", action="store_true", dest="cap",
                     help="estimate the per-scenario speed cap that makes the ODD drivable")
+    return ap
+
+
+def main() -> int:
+    ap = _build_parser()
     args = ap.parse_args()
 
     from scipy.stats.qmc import LatinHypercube, scale as qmc_scale

@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 """
-Rank the arms of a saved campaign by rare-failure yield -- no simulator needed.
+Rank the arms of a saved campaign by rare-failure yield, without the simulator.
 
     python scripts/rank_arms.py results/cmp_md_raw.npz
     python scripts/rank_arms.py results/cmp_rare_raw.npz \
-           --max-angle 8 --max-speed 9.6 --max-seg 12
+        --max-angle 8 --max-speed 9.6 --max-seg 12
     python scripts/rank_arms.py results/cmp_md_raw.npz --out results/rank_md
 
-The ODD flags matter and are not optional bookkeeping: "rare" is defined
-relative to the operational distribution, so passing the wrong bounds silently
-scores the failures against a domain the campaign never ran in. Pass the same
-flags the campaign was run with. The script prints the bounds it used; check
-them against the campaign before quoting anything.
+Rarity is defined against the operational distribution, so the ODD flags select
+which failures count as rare: they must be the ones the campaign was run with.
+The script prints the bounds it used at the top of the report.
 
 Per-seed provenance
 -------------------
 The paired test needs to know which run produced each point. Campaigns saved
-from now on record it (``seeds_<i>`` in the .npz). Older ones do not, so this
-script reconstructs it from the sibling .json: the clouds were appended in
-execution order, so ordering ``per_seed`` by ``run_index`` recovers the block
-order, and the blocks can be cut apart when the recorded evaluation counts add
-up to the number of saved points. When they do not -- which happens for arms
-that had invalid runs dropped -- that arm is scored but left out of the paired
-test rather than being split on a guess.
+with the current code record it (`seeds_<i>` in the .npz). For older campaigns
+the script reconstructs it from the sibling .json: the clouds were appended in
+execution order, so ordering `per_seed` by `run_index` recovers the block order,
+and the blocks are cut apart when the recorded evaluation counts add up to the
+number of saved points. An arm whose counts do not add up -- which happens when
+invalid runs were dropped -- is scored but excluded from the paired test.
 """
 from __future__ import annotations
 
@@ -36,6 +33,8 @@ import numpy as np
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+from pipeline.odd_presets import add_odd_args, resolve_bounds
 
 
 def load_campaign(npz_path: str):
@@ -98,7 +97,8 @@ def _reconstruct_seeds(clouds: dict, per_seed: dict):
     return out, notes
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", help="results/<prefix>_raw.npz")
@@ -121,8 +121,12 @@ def main() -> None:
                          "declared order, stopping at the first failure")
     ap.add_argument("--out", default=None, help="write <out>.json and <out>.txt")
 
-    from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     from pipeline.arm_ranking import (fixed_sequence_report, fixed_sequence_test,
@@ -151,12 +155,12 @@ def main() -> None:
         elif not (np.allclose(lower, meta_lo) and np.allclose(upper, meta_hi)):
             raise SystemExit(
                 "the ODD flags passed do not match the ODD recorded in the "
-                "campagna.\n"
-                f"  campagna: lower={meta_lo.tolist()}\n"
+                "campaign.\n"
+                f"  campaign: lower={meta_lo.tolist()}\n"
                 f"            upper={meta_hi.tolist()}\n"
-                f"  passati : lower={np.asarray(lower).tolist()}\n"
+                f"  passed  : lower={np.asarray(lower).tolist()}\n"
                 f"            upper={np.asarray(upper).tolist()}\n"
-                "Togliere i flag: li prende dai metadati.")
+                "Drop the flags: they are read from the metadata.")
     if lower is None:
         b = scenario.param_bounds()
         lower, upper = np.asarray(b["lower"], float), np.asarray(b["upper"], float)
@@ -180,7 +184,7 @@ def main() -> None:
 
     regions = None
     if args.regions:
-        from pipeline.failure_regions import compare_failure_regions
+        from pipeline.region_comparison import compare_failure_regions
         regions = compare_failure_regions(clouds, lower, upper, threshold=thr,
                                           param_names=names, dists=dists)
 

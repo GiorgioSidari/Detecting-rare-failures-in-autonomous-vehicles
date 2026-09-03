@@ -34,20 +34,21 @@ def run_rare_event(
     verbose: bool = False,
 ):
     """
-    Efficient P(failure) estimate via the Cross-Entropy method.
+        Estimate P(failure) with the Cross-Entropy method.
 
-    Unlike run() (which samples once and counts), this samples ADAPTIVELY toward the failure
-    region and estimates the probability with importance sampling: useful when P is low and
-    plain Monte Carlo would be inefficient.
+        Where `run()` samples once from the operational distribution and counts
+        failures, this fits the sampling distribution iteratively toward the failure
+        region and estimates the probability by importance sampling over a final
+        batch.
 
-    Budget: each iteration runs `samples_per_iter` simulations plus `final_samples` at the end.
-    Defaults here are small (suited to the real ~10 s/run simulator). Raise them for more
-    precision if you can afford more runs (the synthetic validation, where runs are free, uses
-    much larger values -- see scripts/validate_rare_event.py).
+        Budget: `samples_per_iter` simulations per iteration, plus `final_samples` at
+        the end. The defaults here are sized for the real simulator at roughly 10 s per
+        run; `scripts/validate_rare_event.py` runs the same code on a synthetic
+        scenario with much larger values.
 
-    Returns a RareEventResult (p_fail, bootstrap ci, budget, final proposal, ...).
-    Requires the scenario to expose `param_distributions` (the operational distribution).
-    """
+        Returns a `RareEventResult` (p_fail, bootstrap CI, budget, final proposal, ...).
+        Requires the scenario to expose `param_distributions`.
+        """
     scenario: BaseScenario = SCENARIOS[scenario_name]
     bounds = scenario.param_bounds()
     if param_lower is not None:

@@ -30,7 +30,7 @@ from pipeline.active_boundary import run_active_boundary
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenario", default="lane_keeping")
     ap.add_argument("--n-seed", type=int, default=40, help="initial LHS evaluations")
@@ -49,6 +49,11 @@ def main() -> None:
                     help="narrow the ODD: cap segment_length (m)")
     ap.add_argument("--min-seg", type=float, default=None,
                     help="narrow the ODD: raise the segment_length lower bound (m)")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     sc = SCENARIOS[args.scenario]

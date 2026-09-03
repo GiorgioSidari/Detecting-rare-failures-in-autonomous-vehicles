@@ -1,29 +1,28 @@
 """
-Tests for the shared controller (the C2 arm).
+Tests for the shared controller of `scenarios/common/driver.py`.
 
-Two families of checks, with different purposes:
+Closed loop: the driver is coupled to a toy kinematic model and must return to
+the centreline from a lateral offset on either side and from a heading error,
+stay centred when already centred, and not oscillate.
 
-  * **closed-loop stability** -- the controller, coupled to a toy kinematic
-    model, must bring the vehicle back into the lane. If it does not do so here,
-    a failure on a real simulator would not tell "the simulator is hard" from
-    "the controller is broken";
-  * **the degradations do what they claim** -- they exist to make failure
-    scenario-dependent. If `obs_latency` did not really degrade anything, the C2
-    arm would never fail and there would be no boundary to learn: the comparison
-    between search methods would be empty.
+Degradations: `obs_latency` and `obs_lag_tau` each degrade tracking, the latency
+more so at higher speed, and `steer_noise` is reproducible from `seed` and
+re-seeded by `reset`. With all three off the driver is deterministic.
+
+Rate limit and ranges: the limit is expressed in units per second, so the
+authority per second is the same at the control rates of both backends; the
+returned steering and throttle stay in [-1, 1]; the throttle accelerates below
+the target speed and slows above it.
+
+`target_speed`: returns the midpoint of the speed band and is monotone in
+`speed_scale`.
 """
 from __future__ import annotations
 
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
 from scenarios.common.driver import LateralFeedbackDriver, target_speed   # noqa: E402
 from scenarios.common.road_frame import road_frame                    # noqa: E402
@@ -112,12 +111,12 @@ def test_obs_latency_degrades_control():
 
 
 def test_obs_latency_bites_harder_at_high_speed():
-    """
-    This is the envelope mechanism: a latency fixed in STEPS becomes a staleness
-    growing in METRES as speed rises. If that property did not hold, the speed
-    axis would not produce a boundary.
-    """
     def peak(v):
+        """
+        This is the envelope mechanism: a latency fixed in STEPS becomes a staleness
+        growing in METRES as speed rises. If that property did not hold, the speed
+        axis would not produce a boundary.
+        """
         return np.max(np.abs(_simulate(
             LateralFeedbackDriver(obs_latency=6), _straight(), y0=1.0, v=v)))
 

@@ -1,10 +1,8 @@
 """
-Controller shared across the backends -- the C2 arm of the comparison protocol.
+Lateral controller shared by every backend.
 
-One file, used by Udacity and MetaDrive. This is not reuse for convenience: it
-is the condition for C2 to mean anything. If each backend had its own copy of
-the controller, the comparison would also measure the difference between the
-copies, and nobody would notice.
+One file, imported by both Udacity and MetaDrive, so the two run the same
+control law.
 
 State schema (SI units, produced by each backend through `road_frame`):
 
@@ -14,33 +12,24 @@ State schema (SI units, produced by each backend through `road_frame`):
     target_speed  : float -- desired cruising speed (m/s)
     dt            : float -- seconds elapsed since the previous step
 
-Action: `(steering, throttle)`, both normalised.
+Action: `(steering, throttle)`, both normalised to [-1, 1].
 
-Why `dt` is mandatory
----------------------
-The steering rate limiter used to be expressed **per step**. At a different
-control rate, the same value gives a different steering authority:
+The control law is proportional feedback on the two errors:
 
-    0.20/step @ 20.8 Hz  ->  4.2 units/s     (Udacity, 1 worker)
-    0.20/step @  8.5 Hz  ->  1.7 units/s     (Udacity, 4 workers)
-    0.20/step @ 10.0 Hz  ->  2.0 units/s     (MetaDrive)
+    steering = -k_lat * lateral_error - k_head * heading_error
+    throttle =  k_throttle * (target_speed - speed)
 
-That is: three controllers with different responsiveness, all claiming to be the
-same one. On Udacity the rate even depends on the number of workers, so the
-"controller" changed with how the campaign was launched -- and the difference
-would have been charged to the simulator.
+`dt` is used by everything that integrates over time. The steering rate limit
+is expressed in units per SECOND and converted to a per-step delta with `dt`,
+and `obs_lag` filters the observations with a time constant in seconds
+(`alpha = exp(-dt/tau)`). A backend that does not supply `dt` falls back on
+`reference_dt`.
 
-The limit is now in **units per second** and is converted with the step's `dt`.
-The same holds for `obs_lag`, whose time constant was also per step. The backend
-must supply `dt`: exact where the rate is configurable (MetaDrive), measured
-where it varies (Udacity).
-
-The parameters and the control law are taken from the MetaDrive branch's
-`scenarios/lane_keeping_md/driver.py`, which is the implementation already in
-use: adopting it rather than rewriting it avoids introducing a difference in
-exactly the component that must stay constant.
-
-No simulator imports. Only numpy.
+Three optional degradations are applied before the control law when enabled:
+`obs_latency` (integer steps of delay on the observed errors), `obs_lag_tau`
+(exponential smoothing of the same errors, time constant in seconds), and
+`steer_noise` (Gaussian noise added to the steering command). All three are off
+by default.
 """
 from __future__ import annotations
 
@@ -74,57 +63,44 @@ class Driver:
 @dataclass
 class LateralFeedbackDriver(Driver):
     """
-    Proportional feedback on lateral and heading error, with a speed regulator.
+    Proportional feedback on lateral and heading error, plus a speed regulator.
+
+    The steering command before clipping and rate limiting is
 
         raw = -k_lat * lateral_error - k_head * heading_error
 
-    Signs: `lateral_error > 0` (vehicle to the left) must produce negative
-    steering, i.e. to the right.
+    so a positive `lateral_error` (vehicle to the left of the centreline)
+    produces negative steering, i.e. to the right. The throttle command is
+    `k_throttle * (target_speed - speed)`. Both are clipped to [-1, 1].
 
-    What this is, and what it is not
-    --------------------------------
-    This is NOT geometric pure pursuit. Pure pursuit picks a lookahead point on
-    the path at distance `l_d` and steers along the arc that reaches it:
+    The class is a linear feedback law: it holds no lookahead point, no
+    wheelbase and no path geometry. The ratio `k_head / k_lat` (0.8 / 0.35, so
+    about 2.3 m) is the only length scale in it.
 
-        delta = arctan(2 * L * sin(alpha) / l_d)
+    Fields
+    ------
+    `k_lat`, `k_head`, `k_throttle`
+        Gains of the two steering terms and of the throttle term.
+    `max_steer_rate`
+        Highest |steering delta| per SECOND; the per-step bound is
+        `max_steer_rate * dt`. 0 disables the limit.
+    `obs_latency`
+        Number of steps of delay: `act` uses the state stored `obs_latency`
+        steps earlier, kept in a `deque` of length `obs_latency + 1`.
+    `obs_lag_tau`
+        Time constant in seconds of an EMA applied to the observed lateral and
+        heading errors, with `alpha = exp(-dt / obs_lag_tau)`. 0 disables it.
+    `steer_noise`
+        Standard deviation of the Gaussian noise added to `raw`. 0 disables it.
+    `seed`
+        Seed of the internal RNG used by `steer_noise`; re-applied on `reset`.
+    `reference_dt`
+        `dt` used when the state dict carries none, or carries a non-positive
+        one.
 
-    There is no lookahead point here, no wheelbase and no arc -- only a linear
-    combination of the two errors. The class was called `PurePursuitDriver` for
-    a while, which claimed more than it did.
-
-    The two are related, and the relation is worth knowing because it is the
-    honest way to describe this controller. Linearising pure pursuit for small
-    angles gives
-
-        delta ~= -(2L / l_d^2) * lateral_error - (2L / l_d) * heading_error
-
-    which is exactly the form above. The ratio of the gains therefore carries an
-    **effective lookahead** of `k_head / k_lat` = 0.8 / 0.35 ~= 2.3 m. The
-    absolute gains, however, are tuned rather than derived from the vehicle
-    geometry, so the correspondence is one of form, not of derivation.
-
-    None of this matters for the experiment's validity: what the C2 arm needs is
-    not a good controller but *the same* controller on both simulators, which is
-    what makes everything else attributable to the backend.
-
-    Degradations, all OFF by default
-    --------------------------------
-    They exist to make the controller *fallible in a scenario-dependent way*. On
-    exact state this law never errs, and an arm that never fails has no boundary
-    to learn: the comparison between search methods becomes empty. With the
-    degradations active, failure emerges on tight curves at high speed, which is
-    the behaviour we want to study.
-
-      `obs_latency` : acts on the state from N steps ago. Reproduces the failure
-                      mechanism of interest -- the controller steers on stale
-                      observations -- and since a latency fixed in STEPS becomes
-                      a staleness growing in METRES as `meters_per_step` grows,
-                      the failures line up along the envelope.
-      `obs_lag`     : the continuous version of the same thing (EMA on the
-                      perceived errors), useful to sweep difficulty smoothly
-                      instead of in integer jumps.
-      `steer_noise` : Gaussian noise on the steering, for a stochastic band
-                      around the boundary instead of a sharp threshold.
+    State kept between steps: the observation buffer, the EMA state, the
+    previous steering command (for the rate limit) and the RNG. `reset` clears
+    all four.
     """
 
     needs_camera: bool = False
@@ -133,21 +109,19 @@ class LateralFeedbackDriver(Driver):
     k_head: float = 0.8          # steering per radian of heading error
     k_throttle: float = 0.3      # throttle per (m/s) of speed error
 
-    #: |steering delta| highest per SECOND (0 = off). The default 4.0 reproduces
-    #: the historical 0.20/step at the 20 Hz reference rate, but the steering
-    #: authority is now the same on every backend whatever its rate.
+    #: Highest |steering delta| per SECOND (0 = off). Converted to a per-step
+    #: bound as `max_steer_rate * dt`, so the limit is the same at any rate.
     max_steer_rate: float = 4.0
 
     obs_latency: int = 0
-    #: Time constant (seconds) of the observation sluggishness. It used to be a
-    #: per-step EMA coefficient, and so also rate-dependent. 0 = off.
+    #: Time constant (seconds) of the EMA applied to the observed errors:
+    #: `alpha = exp(-dt / obs_lag_tau)`. 0 = off.
     obs_lag_tau: float = 0.0
     steer_noise: float = 0.0
     seed: Optional[int] = None
 
-    #: `dt` used when the state does not supply one. Not an innocuous default:
-    #: it is the rate the controller was historically tuned at. The backend MUST
-    #: pass `dt`; this value only exists so that ad-hoc calls do not break.
+    #: `dt` used when the state dict supplies none, or supplies a non-positive
+    #: one. Backends normally pass their own `dt` in the state.
     reference_dt: float = 0.05
 
     _prev_steer: float = field(default=0.0, repr=False)
@@ -164,8 +138,7 @@ class LateralFeedbackDriver(Driver):
         self._prev_steer = 0.0
         self._buf = deque(maxlen=max(1, int(self.obs_latency) + 1))
         self._ema = None
-        # The RNG is re-seeded: two runs with the same seed must give the same
-        # noise sequence, otherwise the campaign is not reproducible.
+        # Re-seeding the RNG restarts the same noise sequence for a given seed.
         self._rng = np.random.default_rng(self.seed)
 
     def act(self, state: dict) -> Tuple[float, float]:
@@ -176,17 +149,14 @@ class LateralFeedbackDriver(Driver):
         lateral = float(used.get("lateral_error", 0.0))
         heading = float(used.get("heading_error", 0.0))
 
-        # Time step: exact on backends with a configurable rate, measured on
-        # Udacity where it depends on load. Everything that integrates over time
-        # goes through here, so the controller is the same at different rates.
+        # Time step supplied by the backend; used by the EMA and by the
+        # steering rate limit, the two terms that integrate over time.
         dt = float(state.get("dt", self.reference_dt))
         if dt <= 0.0:
             dt = self.reference_dt
 
         if self.obs_lag_tau and self.obs_lag_tau > 0.0:
-            # Fixed-time-constant EMA: alpha = exp(-dt/tau) instead of a
-            # per-step coefficient, which would respond differently at
-            # different rates.
+            # EMA with a fixed time constant: alpha = exp(-dt / tau).
             a = math.exp(-dt / float(self.obs_lag_tau))
             if self._ema is None:
                 self._ema = [lateral, heading]
@@ -195,8 +165,8 @@ class LateralFeedbackDriver(Driver):
                 self._ema[1] = a * self._ema[1] + (1.0 - a) * heading
             lateral, heading = self._ema[0], self._ema[1]
 
-        # The throttle regulates on the CURRENT speed: it is actuation, not
-        # perception, so it does not go through the latency buffer.
+        # Speed and target speed are read from the current state, not from the
+        # delayed one: they do not go through the latency buffer.
         speed = float(state.get("speed", 0.0))
         target = float(state.get("target_speed", 0.0))
 
@@ -219,8 +189,7 @@ def target_speed(min_speed: float, max_speed: float, speed_scale: float = 1.0) -
     """
     Cruising speed from the scenario's speed band.
 
-    `speed_scale` is the calibration lever of the operating point: it is lowered
-    until the backend sits at 10-20% failures under uniform sampling. A backend
-    at 0% or at 100% carries no information, and the boundary is not learnable.
+    Returns `0.5 * (min_speed + max_speed) * speed_scale`, i.e. the midpoint of
+    the band scaled by `speed_scale`.
     """
     return 0.5 * (float(min_speed) + float(max_speed)) * float(speed_scale)

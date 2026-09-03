@@ -30,14 +30,14 @@ class _Resp:
 
 
 class FakeSimulatorPool:
-    """
-    Minimal stand-in for the SimulatorServer REST API.
-
-    `stuck_urls` answer /health and accept POST /simulate, but their jobs stay
-    "running" forever — the exact failure mode of a hung Unity container.
-    """
 
     class RequestException(Exception):
+        """
+        Minimal stand-in for the SimulatorServer REST API.
+
+        `stuck_urls` answer /health and accept POST /simulate, but their jobs stay
+        "running" forever — the exact failure mode of a hung Unity container.
+        """
         pass
 
     def __init__(self, stuck_urls=(), steps: int = 12):
@@ -66,7 +66,6 @@ class FakeSimulatorPool:
 
     # -- the two verbs the scenario uses ------------------------------------
     def get(self, url, timeout=None):
-        base = self._base(url)
         if url.endswith("/health"):
             return _Resp({"status": "ok"})
         job_id = url.rsplit("/", 1)[-1]

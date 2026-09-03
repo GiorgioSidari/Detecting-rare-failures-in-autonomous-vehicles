@@ -1,35 +1,30 @@
 """
 Worst-case search: find the parameters that MINIMISE the QoI safety margin.
 
-The rest of the pipeline asks "how often does it fail?" (rarity) and "where is
-the fail/safe boundary?" (active boundary). This module asks the third question:
-**how bad can it get, and with which parameters?** Formally
+Both optimisers in this module solve
 
     theta* = argmin_theta  margin(theta),    theta in [lower, upper]
 
-The margin is the scenario's QoI (for lane keeping the composite margin of
-``scenarios/lane_keeping/qoi.py``: XTE margin, steering peak, early approach).
-It is expensive (one Unity run per evaluation), noisy (the control loop is not
-deterministic) and has no gradient — which rules out anything gradient-based and
-argues for the two optimisers implemented here:
+where `margin` is the scenario's QoI (for lane keeping, the composite margin of
+`scenarios/lane_keeping/qoi.py`) evaluated by running one simulation per point.
+No gradient of `margin` is available, so both optimisers are derivative-free.
 
-* :class:`BayesianQoIOptimizer` — GP surrogate + Expected Improvement. The most
-  sample-efficient option, and the right default at ~10 s per evaluation. It
-  also leaves behind a fitted GP that says which parameters drive the worst case.
-* :class:`CMAESQoIOptimizer` — self-contained CMA-ES (no extra dependency). It
-  evaluates a whole generation at once, so it maps directly onto the parallel
-  simulator pool, and it copes better when the landscape is rugged or the
-  dimension is high enough that a GP starts to struggle.
+* :class:`BayesianQoIOptimizer` -- fits a GP surrogate to the evaluated points
+  and picks the next batch by Expected Improvement, reusing `evaluate_batch`,
+  `greedy_diverse` and `rbf_lengthscales` from `pipeline.active_boundary` and
+  `build_seeded_gp` from `pipeline.active_boundary_random`.
+* :class:`CMAESQoIOptimizer` -- a self-contained CMA-ES (no extra dependency)
+  that evaluates one generation per iteration, so a whole generation can be
+  dispatched to the simulator pool at once.
 
-Both are budgeted in simulations, both return every point they evaluated, and
-both expose the ``label`` / ``budget`` / ``run(seed)`` interface, so they drop
-straight into :class:`pipeline.model_comparison.ModelComparison` as an extra arm
-and their findings feed the failure-region analysis like any other method.
+Both take a budget expressed in simulations, keep every point they evaluate,
+and expose the same `label` / `budget` / `run(seed)` interface as the search
+methods in `pipeline.model_comparison`, so they can be registered as an arm
+there.
 
-A word of warning on interpretation: the minimiser is the WORST case, not the
-most likely failure. A theta* that sits in a corner of the ODD with probability
-1e-9 is a valid stress test and a poor risk estimate. Read this module together
-with the rare-event probability, never instead of it.
+The returned `best_theta` is the point with the lowest observed margin inside
+the ODD box; it is not weighted by the operational density `f`, which is what
+`pipeline.rare_event` estimates instead.
 
 Usage
 -----
@@ -46,7 +41,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from pipeline.active_boundary import _evaluate, _greedy_diverse, _rbf_lengthscales
+from pipeline.active_boundary import evaluate_batch, greedy_diverse, rbf_lengthscales
 from pipeline.active_boundary_random import build_seeded_gp
 from pipeline.samplers import get_sampler
 
@@ -110,11 +105,11 @@ class QoIOptimizationResult:
 # Shared plumbing
 # ─────────────────────────────────────────────────────────────────────────────
 class _BaseQoIOptimizer:
-    """Bounds handling, unit-cube mapping and evaluation bookkeeping."""
 
     def __init__(self, scenario, *, budget: int = 120, n_init: int = 0,
                  sampler="lhs", param_lower=None, param_upper=None,
                  verbose: bool = False):
+        """Bounds handling, unit-cube mapping and evaluation bookkeeping."""
         if isinstance(scenario, str):
             from scenarios import SCENARIOS
             scenario = SCENARIOS[scenario]
@@ -135,19 +130,19 @@ class _BaseQoIOptimizer:
         self.threshold = float(scenario.failure_threshold())
         self.n_init = int(n_init) if n_init else max(2 * self.d, self.budget // 4)
 
-    def to_unit(self, theta):
+    def to_unit(self, theta: np.ndarray):
         return (np.asarray(theta, float) - self.lower) / self.span
 
-    def from_unit(self, u):
+    def from_unit(self, u: np.ndarray):
         return np.asarray(u, float) * self.span + self.lower
 
     def _simulate(self, unit_pts: np.ndarray):
         """Evaluate unit-cube points; returns (theta, margins) for the valid ones."""
         theta = self.from_unit(np.clip(unit_pts, 0.0, 1.0))
-        margins, valid = _evaluate(self.scenario, theta)
+        margins, valid = evaluate_batch(self.scenario, theta)
         return theta[valid], margins[valid]
 
-    def _finish(self, theta_all, margin_all, history, model=None,
+    def _finish(self, theta_all: np.ndarray, margin_all: np.ndarray, history, model=None,
                 importance=None, extra=None) -> QoIOptimizationResult:
         theta_all = np.asarray(theta_all, float)
         margin_all = np.asarray(margin_all, float)
@@ -185,7 +180,8 @@ class _BaseQoIOptimizer:
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Bayesian optimisation (GP + Expected Improvement)
 # ─────────────────────────────────────────────────────────────────────────────
-def _expected_improvement(mu, sigma, best, xi: float = 0.01) -> np.ndarray:
+def _expected_improvement(mu: np.ndarray, sigma: np.ndarray, best: float,
+                          xi: float = 0.01) -> np.ndarray:
     """
     EI for MINIMISATION: E[max(best - f(x) - xi, 0)] under the GP posterior.
 
@@ -202,23 +198,23 @@ def _expected_improvement(mu, sigma, best, xi: float = 0.01) -> np.ndarray:
 
 
 class BayesianQoIOptimizer(_BaseQoIOptimizer):
-    """
-    Sample-efficient worst-case search with a GP surrogate and EI acquisition.
-
-    Parameters
-    ----------
-    budget  : total simulations (initial design included).
-    n_init  : size of the initial design; defaults to max(2d, budget/4).
-    batch   : evaluations per iteration — set it to the number of simulator
-              workers so each round fills the pool.
-    pool_size : candidate points scored by EI per iteration (model-only, free).
-    xi      : EI exploration bonus.
-    """
 
     def __init__(self, scenario, *, budget: int = 120, n_init: int = 0,
                  batch: int = 4, pool_size: int = 4000, xi: float = 0.01,
                  sampler="lhs", param_lower=None, param_upper=None,
                  verbose: bool = False):
+        """
+        Sample-efficient worst-case search with a GP surrogate and EI acquisition.
+
+        Parameters
+        ----------
+        budget  : total simulations (initial design included).
+        n_init  : size of the initial design; defaults to max(2d, budget/4).
+        batch   : evaluations per iteration — set it to the number of simulator
+                  workers so each round fills the pool.
+        pool_size : candidate points scored by EI per iteration (model-only, free).
+        xi      : EI exploration bonus.
+        """
         super().__init__(scenario, budget=budget, n_init=n_init, sampler=sampler,
                          param_lower=param_lower, param_upper=param_upper,
                          verbose=verbose)
@@ -255,7 +251,7 @@ class BayesianQoIOptimizer(_BaseQoIOptimizer):
             ei = _expected_improvement(mu, sd, float(margin_all.min()), self.xi)
             # Diversity filter: without it a batch collapses onto one EI peak and
             # the k parallel simulations return k copies of the same information.
-            picks = _greedy_diverse(ei, pool, k, min_dist=0.3 / self.d ** 0.5)
+            picks = greedy_diverse(ei, pool, k, min_dist=0.3 / self.d ** 0.5)
 
             th_new, m_new = self._simulate(pool[picks])
             spent += k
@@ -270,7 +266,7 @@ class BayesianQoIOptimizer(_BaseQoIOptimizer):
 
         gp = build_seeded_gp(self.d, seed)
         gp.fit(self.to_unit(theta_all), margin_all)
-        ls = _rbf_lengthscales(gp.kernel_, self.d)
+        ls = rbf_lengthscales(gp.kernel_, self.d)
         inv = 1.0 / np.maximum(ls, 1e-9)
         importance = inv / inv.sum()
 
@@ -285,30 +281,30 @@ class BayesianQoIOptimizer(_BaseQoIOptimizer):
 # 2. CMA-ES
 # ─────────────────────────────────────────────────────────────────────────────
 class CMAESQoIOptimizer(_BaseQoIOptimizer):
-    """
-    Covariance Matrix Adaptation Evolution Strategy, implemented in numpy.
-
-    CMA-ES samples a generation from N(m, sigma^2 C), keeps the best mu, and
-    adapts m, sigma and C so the search distribution stretches along the
-    directions that improved the objective. It needs no gradient, tolerates
-    noise, and — the practical reason it is here — evaluates a full generation
-    per step, which the parallel simulator pool absorbs for free.
-
-    Box constraints are handled by clipping the samples to [lower, upper] and
-    updating from the CLIPPED points, so the distribution learns to stay inside
-    the ODD instead of wasting samples outside it.
-
-    Parameters
-    ----------
-    budget   : total simulations.
-    popsize  : generation size lambda; defaults to 4 + floor(3 ln d).
-    sigma0   : initial step size, as a fraction of each parameter's range.
-    x0       : starting point in physical units (defaults to the ODD centre).
-    """
 
     def __init__(self, scenario, *, budget: int = 120, popsize: int = 0,
                  sigma0: float = 0.3, x0=None, sampler="lhs",
                  param_lower=None, param_upper=None, verbose: bool = False):
+        """
+        Covariance Matrix Adaptation Evolution Strategy, implemented in numpy.
+
+        CMA-ES samples a generation from N(m, sigma^2 C), keeps the best mu, and
+        adapts m, sigma and C so the search distribution stretches along the
+        directions that improved the objective. It needs no gradient, tolerates
+        noise, and — the practical reason it is here — evaluates a full generation
+        per step, which the parallel simulator pool absorbs for free.
+
+        Box constraints are handled by clipping the samples to [lower, upper] and
+        updating from the CLIPPED points, so the distribution learns to stay inside
+        the ODD instead of wasting samples outside it.
+
+        Parameters
+        ----------
+        budget   : total simulations.
+        popsize  : generation size lambda; defaults to 4 + floor(3 ln d).
+        sigma0   : initial step size, as a fraction of each parameter's range.
+        x0       : starting point in physical units (defaults to the ODD centre).
+        """
         super().__init__(scenario, budget=budget, n_init=1, sampler=sampler,
                          param_lower=param_lower, param_upper=param_upper,
                          verbose=verbose)
@@ -320,25 +316,44 @@ class CMAESQoIOptimizer(_BaseQoIOptimizer):
     def label(self) -> str:
         return "qoi_cmaes"
 
-    def run(self, seed: int = 0) -> QoIOptimizationResult:
-        rng = np.random.default_rng(seed)
-        N = self.d
-        lam = self.popsize
-        mu = lam // 2
+    @staticmethod
+    def _strategy_constants(N: int, lam: int) -> tuple:
+        """
+        The CMA-ES weights and learning rates, Hansen's defaults.
 
-        # Recombination weights: log-decreasing, so the best of the generation
-        # pulls the mean hardest. mueff is the variance-effective sample size.
+        Recombination weights are log-decreasing, so the best of the generation
+        pulls the mean hardest; `mueff` is the variance-effective sample size,
+        and every learning rate below scales with it and with the dimension.
+
+        Returns ``(w, mueff, cc, cs, c1, cmu, damps, chiN)``.
+        """
+        mu = lam // 2
         w = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
         w /= w.sum()
         mueff = 1.0 / np.sum(w ** 2)
 
-        # Learning rates (Hansen's defaults; they scale with N and mueff).
         cc = (4 + mueff / N) / (N + 4 + 2 * mueff / N)      # cumulation for C
         cs = (mueff + 2) / (N + mueff + 5)                  # cumulation for sigma
         c1 = 2 / ((N + 1.3) ** 2 + mueff)                   # rank-one learning rate
         cmu = min(1 - c1, 2 * (mueff - 2 + 1 / mueff) / ((N + 2) ** 2 + mueff))
         damps = 1 + 2 * max(0.0, np.sqrt((mueff - 1) / (N + 1)) - 1) + cs
         chiN = np.sqrt(N) * (1 - 1 / (4 * N) + 1 / (21 * N ** 2))
+        return w, mueff, cc, cs, c1, cmu, damps, chiN
+
+    def run(self, seed: int = 0) -> QoIOptimizationResult:
+        """
+        CMA-ES on the safety margin, in the unit cube, until the budget is out.
+
+        The adaptation loop is kept as one flow on purpose: it follows the
+        published update equations step by step, and splitting it would mean
+        threading a dozen state variables through helpers that each do half a
+        formula.
+        """
+        rng = np.random.default_rng(seed)
+        N = self.d
+        lam = self.popsize
+        mu = lam // 2
+        w, mueff, cc, cs, c1, cmu, damps, chiN = self._strategy_constants(N, lam)
 
         xmean = (np.full(N, 0.5) if self.x0 is None
                  else np.clip(self.to_unit(np.asarray(self.x0, float)).ravel(), 0, 1))

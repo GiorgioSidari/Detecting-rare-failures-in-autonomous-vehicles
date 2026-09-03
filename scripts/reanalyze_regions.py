@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Re-run the failure-region analysis on a saved campaign — no simulator needed.
+Re-run the failure-region analysis on a saved campaign, without the simulator.
 
-The simulations are the expensive part (hours of Unity); the analysis on top of
-them is seconds, and it has knobs you will want to turn: the clustering radius,
-how narrow a region must be before an axis counts as a constraint, whether to
-weight by the ODD or uniformly. This script reads the ``*_raw.npz`` written by
-``run_model_comparison.py --out`` and redoes everything downstream.
+The script reads the `*_raw.npz` written by `run_model_comparison.py --out` and
+redoes everything downstream of the simulations: clustering of the failing
+points, per-region bounds and per-axis spread, and the probability that a draw
+from the operational distribution lands in each region.
+
+Options that change the analysis: `--eps` (DBSCAN radius), `--max-span` (how
+narrow a region must be on an axis before that axis counts as a constraint) and
+the ODD flags, which set the distribution the region probabilities are computed
+against.
 
 Usage:
     python scripts/reanalyze_regions.py results/cmp_raw.npz
@@ -14,15 +18,13 @@ Usage:
     python scripts/reanalyze_regions.py results/cmp_raw.npz --max-span 0.3 \
         --out results/cmp_v2
 
-    # campaign run before _raw.npz existed: rebuild the failure cloud from the
-    # regions CSV (the singleton centroids ARE the failing points)
+    # campaign saved before _raw.npz existed: rebuild the failure cloud from the
+    # regions CSV, whose singleton centroids are the failing points themselves
     python scripts/reanalyze_regions.py results/cmp_regions.csv --from-csv
 
-A note on reading the output: look at the per-axis spread table FIRST. If the
-failure cloud spans the whole ODD on every axis there is no localised failure
-region, and no clustering parameter will conjure one — the honest conclusion is
-that the model fails throughout this ODD, and the comparison has to move to a
-narrower one before it can say anything about rare regions.
+The output starts with the per-axis spread table: an axis whose failures span
+the whole ODD is not a constraint of the region, whatever the clustering
+parameters.
 """
 from __future__ import annotations
 
@@ -77,7 +79,7 @@ def load_regions_csv(path: str):
              for lab, (t, m) in runs.items()}, names)
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Re-analyse a saved campaign offline.")
     ap.add_argument("path", help="results/<prefix>_raw.npz (or _regions.csv with --from-csv)")
     ap.add_argument("--from-csv", action="store_true",
@@ -99,12 +101,17 @@ def main() -> None:
     ap.add_argument("--verbose", action="store_true",
                     help="add the pairwise matrix and the non-localised groups")
     ap.add_argument("--out", default=None, help="write the report and JSON here")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
 
     from pipeline.odd_presets import add_odd_args, resolve_bounds
     add_odd_args(ap)
     args = ap.parse_args()
 
-    from pipeline.failure_regions import compare_failure_regions
+    from pipeline.region_comparison import compare_failure_regions
     from scenarios import SCENARIOS
 
     runs, names = (load_regions_csv(args.path) if args.from_csv

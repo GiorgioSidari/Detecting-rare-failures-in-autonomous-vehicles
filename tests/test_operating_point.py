@@ -8,26 +8,20 @@ tests the error would only surface as absurd results downstream.
 """
 from __future__ import annotations
 
-import os
-import sys
 
 import pytest
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
 from pipeline.operating_point import Evaluation, calibrate   # noqa: E402
 
 
 def _fake_backend(curve, n_valid=40, n_total=40):
-    """
-    Valutatore sintetico: `curve(speed_scale) -> failure_rate`.
-
-    Must be non-decreasing in speed_scale -- faster, more failures -- because
-    that is the assumption the bisection rests on.
-    """
     def _valuta(scale: float) -> Evaluation:
+        """
+        Valutatore sintetico: `curve(speed_scale) -> failure_rate`.
+
+        Must be non-decreasing in speed_scale -- faster, more failures -- because
+        that is the assumption the bisection rests on.
+        """
         r = float(curve(scale))
         return Evaluation(speed_scale=scale, failure_rate=r,
                            n_valid=n_valid, n_total=n_total,
@@ -40,7 +34,7 @@ def _fake_backend(curve, n_valid=40, n_total=40):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_centres_the_band_on_a_linear_curve():
-    res = calibrate(_fake_backend(lambda s: s), backend="finto", verbose=False)
+    res = calibrate(_fake_backend(lambda s: s), backend="fake", verbose=False)
     assert res.centered
     assert 0.10 <= res.failure_rate <= 0.20
     assert 0.10 <= res.speed_scale <= 0.21
@@ -49,7 +43,7 @@ def test_centres_the_band_on_a_linear_curve():
 def test_centres_the_band_on_a_steep_curve():
     """A failure rate that shoots up: the bisection must still find the band."""
     res = calibrate(_fake_backend(lambda s: min(1.0, s ** 3 * 4)),
-                  backend="finto", verbose=False)
+                  backend="fake", verbose=False)
     assert res.centered
     assert 0.10 <= res.failure_rate <= 0.20
 
@@ -59,7 +53,7 @@ def test_uses_few_steps():
     Every evaluation costs N simulations: on Udacity that means minutes. The
     bisection must converge in a few iterations, not explore.
     """
-    res = calibrate(_fake_backend(lambda s: s), backend="finto",
+    res = calibrate(_fake_backend(lambda s: s), backend="fake",
                   max_iter=8, verbose=False)
     assert len(res.history) <= 10
 

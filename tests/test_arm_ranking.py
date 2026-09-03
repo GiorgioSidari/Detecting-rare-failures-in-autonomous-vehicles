@@ -1,20 +1,29 @@
 """
-Tests for the rare-failure ranking, and for the guard that stopped the
-cross-entropy arm from reporting a probability it cannot estimate.
+Tests for `pipeline.arm_ranking`: the rare-failure ranking, the paired tests and
+the pre-registered sequence.
 
-The regression these exist for
-------------------------------
-The comparison campaigns ran the CE arms at ``final_samples=45`` with
-``alpha=0.2``, i.e. NINE draws from the nominal distribution. The defensive
-weights bound the contribution of each such draw by 1/alpha, so the estimator
-degenerates into a nine-sample Monte Carlo quantised at multiples of
-(1/alpha)/final_samples -- it returned 0.11111 and 0.33333 on the real campaigns
-and 0 whenever those nine draws missed the failure region, for a probability
-that plain sampling measured at 3e-2.
+Groups of tests:
 
-The estimator is not wrong; the configuration is outside the one the other tests
-cover (2-D, unimodal, ``final_samples=1500``). Nothing warned. These tests pin
-the warning down, so the configuration cannot come back silently.
+  * defensive budget -- `MIN_DEFENSIVE_SAMPLES` is the number of draws from the
+    nominal distribution (`alpha * final_samples`), the warning fires below that
+    floor and is silent above it, and an estimate flagged unusable is carried
+    through the harness and printed without a number. With
+    `final_samples = 45` and `alpha = 0.2` the estimator is quantised at
+    multiples of `(1 / alpha) / final_samples` and its effective sample size
+    collapses; the validated budget does not quantise on the same problem.
+  * rarity -- the cut selects the declared fraction of the ODD, it depends on
+    where a failure sits and not on which arm found it, and rankings computed on
+    different ODDs refuse to be compared.
+  * pairing -- runs are paired by seed when the provenance is present, and the
+    ranking reports the absence of provenance instead of testing on a guess.
+  * pre-registered sequence -- a clean sweep rejects with enough seeds and
+    cannot at three, the sequence stops at the first non-rejection and marks the
+    rest untested, an effect in the wrong direction is not a win, a missing arm
+    stops the sequence, the shipped plan is valid and a malformed one is
+    rejected.
+  * degenerate campaigns -- a campaign with no failures is not a ranking, the
+    paired block does not claim "no difference" when nothing failed, and an
+    undefined drift correlation is not reported as absence of drift.
 """
 import warnings
 
@@ -30,7 +39,6 @@ from pipeline.arm_ranking import (
     rarity_reference,
 )
 from pipeline.rare_event import (
-    MIN_DEFENSIVE_SAMPLES,
     check_defensive_budget,
     defensive_sample_count,
     effective_sample_size,
@@ -42,9 +50,9 @@ from pipeline.rare_event_random import LHSCrossEntropy, RandomSearchCrossEntropy
 # A 2-D scenario whose tail probability is known exactly
 # ─────────────────────────────────────────────────────────────────────────────
 class TailScenario:
-    """Fails iff p0 > 0.9 under a uniform ODD on [0,1]^2 => P(fail) = 0.10."""
 
     def param_bounds(self):
+        """Fails iff p0 > 0.9 under a uniform ODD on [0,1]^2 => P(fail) = 0.10."""
         return {"names": ["p0", "p1"], "lower": np.zeros(2), "upper": np.ones(2)}
 
     def param_distributions(self, lower=None, upper=None):
@@ -292,9 +300,9 @@ def test_odd_log_density_rejects_a_mismatched_parameter_space():
 # The harness end to end: the flag has to survive all the way to the report
 # ─────────────────────────────────────────────────────────────────────────────
 class ThreeDScenario(TailScenario):
-    """Uniform ODD on [0,1]^3, fails iff p0 > 0.85."""
 
     def param_bounds(self):
+        """Uniform ODD on [0,1]^3, fails iff p0 > 0.85."""
         return {"names": ["a", "b", "c"], "lower": np.zeros(3),
                 "upper": np.ones(3)}
 

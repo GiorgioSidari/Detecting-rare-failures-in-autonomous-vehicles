@@ -9,10 +9,9 @@ any simulator or the scenario registry (the mock is a plain duck-typed object).
 Run:  pytest tests/test_active_boundary.py -q
 """
 import numpy as np
-import pytest
 
 from pipeline.active_boundary import (
-    run_active_boundary, _p_fail, _greedy_diverse, _rbf_lengthscales,
+    run_active_boundary, failure_probability, greedy_diverse, rbf_lengthscales,
 )
 
 
@@ -54,22 +53,22 @@ class MockScenario:
 
 def test_p_fail_monotonic():
     # More negative predicted margin -> higher P(fail).
-    p_low = _p_fail(np.array([1.0]), np.array([0.5]), thr=0.0)[0]
-    p_high = _p_fail(np.array([-1.0]), np.array([0.5]), thr=0.0)[0]
+    p_low = failure_probability(np.array([1.0]), np.array([0.5]), thr=0.0)[0]
+    p_high = failure_probability(np.array([-1.0]), np.array([0.5]), thr=0.0)[0]
     assert p_high > 0.5 > p_low
 
 
 def test_greedy_diverse_spreads():
     X = np.array([[0, 0], [0.01, 0], [1, 1]], float)
     scores = np.array([1.0, 0.9, 0.8])
-    pick = _greedy_diverse(scores, X, k=2, min_dist=0.5)
+    pick = greedy_diverse(scores, X, k=2, min_dist=0.5)
     assert 0 in pick and 2 in pick     # skips the near-duplicate of point 0
 
 
 def test_rbf_lengthscales_extraction():
     from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
     k = ConstantKernel(1.0) * RBF(length_scale=[1.0, 2.0, 3.0]) + WhiteKernel(0.1)
-    ls = _rbf_lengthscales(k, 3)
+    ls = rbf_lengthscales(k, 3)
     assert np.allclose(ls, [1.0, 2.0, 3.0])
 
 

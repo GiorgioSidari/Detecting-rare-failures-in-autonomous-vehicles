@@ -1,30 +1,26 @@
 """
 Emergency Braking simulator driven by the trained MLP controller.
 
-How it differs from EmergencyBrakingSimulator
----------------------------------------------
-The physics simulator uses:
+Difference from `EmergencyBrakingSimulator`
+-------------------------------------------
+The physics simulator computes
+
     actual_decel = friction * 9.81 * braking_efficiency
     actual_delay = nominal_delay + LogNormal noise
 
-This NNSimulator uses instead:
-    braking_force = BrakingMLP.predict([velocity, dist_to_obstacle, t])  ∈ [0, 1]
+This simulator computes instead
+
+    braking_force = BrakingMLP.predict([velocity, dist_to_obstacle, t])  in [0, 1]
     applied_decel = braking_force * friction * 9.81
 
-The stochastic delay and braking_efficiency are intentionally removed.
-The MLP's imperfect approximation of the optimal policy *is* the source of
-variance. On unseen parameter combinations (especially edge cases like
-high speed + low friction + long delay) the network may output:
-  • a force too low  → insufficient braking → crash
-  • braking too late → vehicle overshoots the obstacle
-
-These systematic generalisation errors are the rare failures we want to detect.
+and applies no stochastic delay and no `braking_efficiency` term: the only
+departure from the nominal policy is the network's own output.
 
 Batched inference
 -----------------
-At each timestep t, we build a (N_active, 3) state matrix and call
-BrakingMLP.predict() once — one forward pass per timestep for all active
-trajectories. This is GPU-friendly and fast.
+At each timestep the simulator assembles a `(N_active, 3)` state matrix for the
+trajectories still running and calls `BrakingMLP.predict()` once, so there is
+one forward pass per timestep rather than one per trajectory.
 """
 
 import os

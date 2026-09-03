@@ -17,9 +17,8 @@ from scipy import stats
 from pipeline.active_boundary_random import (
     ActiveBoundaryRunner, LHSActiveBoundary, RandomSearchActiveBoundary,
 )
-from pipeline.failure_regions import (
-    compare_failure_regions, extract_failure_regions,
-)
+from pipeline.failure_regions import extract_failure_regions
+from pipeline.region_comparison import compare_failure_regions
 from pipeline.model_comparison import ModelComparison, PlainSamplingBaseline
 from pipeline.qoi_optimizer import BayesianQoIOptimizer, CMAESQoIOptimizer, optimize_qoi
 from pipeline.rare_event_random import (
@@ -34,9 +33,9 @@ from pipeline.samplers import (
 # Mocks
 # ─────────────────────────────────────────────────────────────────────────────
 class LinearMock:
-    """Fail iff p0 + p1 > c. Uniform ODD on the unit cube => P(fail) = 0.5 at c = 1."""
 
     def __init__(self, d: int = 3, c: float = 1.0):
+        """Fail iff p0 + p1 > c. Uniform ODD on the unit cube => P(fail) = 0.5 at c = 1."""
         self.d, self.c = d, c
         self._valid_mask = None
 
@@ -63,17 +62,17 @@ class LinearMock:
 
 
 class TwoRegionMock(LinearMock):
-    """
-    Two disjoint failure regions with very different volumes:
-
-      A (broad) : p0 > 0.80 and p1 > 0.80            volume 0.04
-      B (rare)  : |p2 - 0.42| < 0.02 and p3 > 0.90   volume 0.004
-
-    Ground truth for the region-comparison tests: any method that explores the
-    space should find A; B is the one that separates the designs.
-    """
 
     def __init__(self, d: int = 4):
+        """
+        Two disjoint failure regions with very different volumes:
+
+          A (broad) : p0 > 0.80 and p1 > 0.80            volume 0.04
+          B (rare)  : |p2 - 0.42| < 0.02 and p3 > 0.90   volume 0.004
+
+        Ground truth for the region-comparison tests: any method that explores the
+        space should find A; B is the one that separates the designs.
+        """
         super().__init__(d=d)
 
     def compute_qoi(self, traj, theta):
@@ -85,9 +84,9 @@ class TwoRegionMock(LinearMock):
 
 
 class BowlMock(LinearMock):
-    """Smooth bowl with a known minimum at `target`: margin = ||theta - target||^2 - 0.5."""
 
     def __init__(self, target=(0.8, 0.2, 0.5)):
+        """Smooth bowl with a known minimum at `target`: margin = ||theta - target||^2 - 0.5."""
         super().__init__(d=len(target))
         self.target = np.asarray(target, float)
 
@@ -218,9 +217,9 @@ def test_active_boundary_rejects_a_bad_acquisition():
 # Cross-entropy with a pluggable sampler
 # ─────────────────────────────────────────────────────────────────────────────
 class TailMock(LinearMock):
-    """Fail iff p0 > 0.9 under a uniform ODD => P(fail) = 0.10 exactly."""
 
     def __init__(self):
+        """Fail iff p0 > 0.9 under a uniform ODD => P(fail) = 0.10 exactly."""
         super().__init__(d=2)
 
     def compute_qoi(self, traj, theta):
@@ -659,12 +658,12 @@ def test_paired_test_ignores_unpaired_arms():
 # Execution order — the confound that measures the clock, not the design
 # ─────────────────────────────────────────────────────────────────────────────
 class DriftingMock(LinearMock):
-    """
-    A scenario that gets easier over time, like the real simulator warming up.
-    Every call to compute_qoi shifts the margin up a little.
-    """
 
     def __init__(self, d: int = 3, drift: float = 0.01):
+        """
+        A scenario that gets easier over time, like the real simulator warming up.
+        Every call to compute_qoi shifts the margin up a little.
+        """
         super().__init__(d=d)
         self.drift = drift
         self.calls = 0

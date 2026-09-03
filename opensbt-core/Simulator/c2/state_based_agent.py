@@ -1,36 +1,29 @@
 """
-State-based agent for Udacity -- the C2 arm of the cross-simulator comparison.
+State-based agent for Udacity: drives from telemetry and road geometry rather
+than from camera frames.
 
-It drives without looking at pixels: it uses the position from the telemetry and
-the road geometry, which we know because we generate it ourselves. Its purpose is
-to isolate the effect of the **simulator** by holding the controller constant,
-which is the condition for the Udacity <-> MetaDrive comparison to mean anything.
+`predict(obs, state)` ignores the image and computes the two control errors from
+the vehicle position in `state` and the run's centreline:
 
-Why the telemetry `cte` is not enough
--------------------------------------
-Unity exposes `cte`, the lateral error, but **not the lane tangent**: the heading
-error cannot be derived from the telemetry. Without it the lateral controller
-has only half its feedback and oscillates.
+  * the lateral and heading errors come from `shared.road_frame`, which projects
+    the position onto the centreline polyline -- the same projection the
+    MetaDrive backend uses;
+  * the heading itself is estimated from consecutive positions
+    (`yaw_from_positions`), because the Udacity telemetry exposes no vehicle
+    yaw. It is therefore the heading of the trajectory, which equals the vehicle
+    attitude only in the absence of slip. On the first step, with no previous
+    position available, the road tangent is used as the initial estimate;
+  * the errors are passed to `shared.driver.LateralFeedbackDriver`, which
+    returns `(steering, throttle)`.
 
-The fix is to project the position onto the road polyline with
-`shared.road_frame`, the same code the other backend uses. That way both errors
-have a single definition across simulators -- if each backend computed them its
-own way, C2 would be comparing those definitions too.
+The agent exposes the same `predict(obs, state)` interface as `SupervisedAgent`,
+so `UdacitySimulatorC2` can use either.
 
-Unity's `cte` stays valuable anyway: it is an **independent reference** against
-which our projection can be validated at runtime (see `last_cte_mismatch`).
-
-Limiti dichiarati
------------------
-* **The heading is the trajectory's, not the vehicle's attitude.** The telemetry
-  does not expose the vehicle yaw, so it is estimated from consecutive
-  positions. It coincides with the attitude only without slip. At the speeds of
-  this scenario the difference is small, but it is an asymmetry with respect to
-  MetaDrive, where the attitude is directly available. It must be declared in
-  the comparison.
-* **At least one step of history is needed** to have a heading: at the first
-  step the road tangent is used as the initial estimate, which is correct if the
-  car starts aligned (it does: Unity spawns it on the centreline).
+`_validate_against_unity` compares the lateral error obtained from the
+projection with the `cte` reported by the Unity telemetry and stores the
+difference in `last_cte_mismatch`; `_resolve_dt` returns the time step, measured
+from the telemetry timestamps when available and falling back to the driver's
+`reference_dt` otherwise.
 """
 from __future__ import annotations
 
@@ -47,26 +40,26 @@ from ..lanekeeping.self_driving.agent import Agent
 
 
 class StateBasedAgent(Agent):
-    """
-    Adapts the shared controller to the Udacity telemetry.
-
-    It exposes the same interface as `SupervisedAgent` -- `predict(obs, state)`
-    returning `[[steering, throttle]]` -- so the simulation loop changes as
-    little as possible.
-
-    Parameters
-    ----------
-    speed_scale : operating-point calibration lever: lowered until the backend
-                  sits at 10-20% failures under uniform sampling.
-    driver      : injectable controller. By default the shared lateral one; it
-                  can be a degraded variant of it (obs_latency, obs_lag,
-                  steer_noise) to make failure scenario-dependent.
-    """
 
     def __init__(self, env_name: str, min_speed: float = 5.0,
                  max_speed: float = 15.0, speed_scale: float = 1.0,
                  driver: Optional[LateralFeedbackDriver] = None,
                  steering_sign: float = STEERING_SIGN):
+        """
+        Adapts the shared controller to the Udacity telemetry.
+
+        It exposes the same interface as `SupervisedAgent` -- `predict(obs, state)`
+        returning `[[steering, throttle]]` -- so the simulation loop changes as
+        little as possible.
+
+        Parameters
+        ----------
+        speed_scale : operating-point calibration lever: lowered until the backend
+                      sits at 10-20% failures under uniform sampling.
+        driver      : injectable controller. By default the shared lateral one; it
+                      can be a degraded variant of it (obs_latency, obs_lag,
+                      steer_noise) to make failure scenario-dependent.
+        """
         super().__init__(env_name=env_name)
         self.logger = GlobalLog("state_based_agent")
 
@@ -118,7 +111,7 @@ class StateBasedAgent(Agent):
         self.min_speed = float(minSpeed)
         self.max_speed = float(maxSpeed)
 
-    def set_road(self, road_xy) -> None:
+    def set_road(self, road_xy: np.ndarray) -> None:
         """
         Sets the run's centreline and clears the state.
 
@@ -139,6 +132,43 @@ class StateBasedAgent(Agent):
         self.driver.reset()
 
     # -- control ---------------------------------------------------------------
+
+    def _validate_against_unity(self, cte: float, lateral_error: float) -> None:
+        """
+        Compare our lateral error with the simulator's, without using it.
+
+        Purely diagnostic: it accumulates the largest mismatch and how often the
+        two agree in sign, which is what tells an inverted steering convention
+        apart from a wrong geometry. The control law never reads `cte`.
+        """
+        if cte is None:
+            return
+        cte = float(cte)
+        self.last_cte_mismatch = max(
+            self.last_cte_mismatch, abs(abs(cte) - abs(lateral_error)))
+        if abs(cte) > 0.05 and abs(lateral_error) > 0.05:
+            if cte * lateral_error > 0:
+                self.n_sign_agree += 1
+            else:
+                self.n_sign_disagree += 1
+
+    def _resolve_dt(self, supplied) -> float:
+        """
+        Seconds since the previous decision, from the caller or the clock.
+
+        A supplied `dt` is preferred: the loop knows how much time really passed
+        between two commands applied to the vehicle. Measuring it here works in
+        production, where the loop is paced by Unity, but NOT on a test bench
+        where calls follow each other in microseconds -- there the steering rate
+        limiter would choke and the car could not correct. The clamp protects
+        against abnormal pauses (GC, CPU contention between containers).
+        """
+        if supplied is None:
+            now = time.perf_counter()
+            supplied = ((now - self._last_t) if self._last_t is not None
+                        else self.driver.reference_dt)
+            self._last_t = now
+        return min(max(float(supplied), 1e-3), 1.0)
 
     def predict(self, obs: np.ndarray, state: Dict) -> np.ndarray:
         """
@@ -179,34 +209,9 @@ class StateBasedAgent(Agent):
             self.reached_end = True
             return np.asarray([[0.0, 0.0]], dtype=np.float32)
 
-        # Continuous validation against the simulator's reference.
-        cte = state.get("cte")
-        if cte is not None:
-            cte = float(cte)
-            self.last_cte_mismatch = max(
-                self.last_cte_mismatch, abs(abs(cte) - abs(frame.lateral_error)))
-            if abs(cte) > 0.05 and abs(frame.lateral_error) > 0.05:
-                if cte * frame.lateral_error > 0:
-                    self.n_sign_agree += 1
-                else:
-                    self.n_sign_disagree += 1
+        self._validate_against_unity(state.get("cte"), frame.lateral_error)
 
-        # Time step. When the caller supplies one it is used: it is more
-        # reliable than the internal measurement, because the loop knows how much
-        # time really passed between two commands applied to the vehicle.
-        #
-        # Otherwise it is measured with the wall clock. That works in
-        # production, where the loop is paced by Unity, but NOT on a test bench
-        # where calls follow each other in microseconds: there the steering rate
-        # limiter would choke and the car could not correct.
-        dt = state.get("dt")
-        if dt is None:
-            now = time.perf_counter()
-            dt = ((now - self._last_t) if self._last_t is not None
-                  else self.driver.reference_dt)
-            self._last_t = now
-        # Clamp: protects against abnormal pauses (GC, CPU contention between containers).
-        dt = min(max(float(dt), 1e-3), 1.0)
+        dt = self._resolve_dt(state.get("dt"))
 
         speed_kmh = float(state.get("speed", 0.0) or 0.0)
         steering, throttle = self.driver.act({

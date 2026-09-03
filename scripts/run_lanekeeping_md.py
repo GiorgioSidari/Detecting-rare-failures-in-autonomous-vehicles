@@ -100,7 +100,6 @@ def batch(n: int, sampling: str, seed: int) -> None:
     # Worst scenarios by safety margin (most severe failures first).
     order = np.argsort(np.where(np.isnan(r.safety_margins), np.inf, r.safety_margins))
     print("\n worst scenarios (safety margin, lower = worse):")
-    names = r.param_names
     for idx in order[:5]:
         m = r.safety_margins[idx]
         row = r.params[idx]
@@ -134,7 +133,7 @@ def sweep(n: int, seed: int, decision_repeats) -> None:
     print("       (the classifier needs signal).")
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=30, help="batch sample count")
     ap.add_argument("--sampling", choices=["uniform", "realistic"], default="realistic")
@@ -151,6 +150,11 @@ def main() -> None:
                     help="scan obs_lag at fixed rate to find a mid failure band, then stop")
     ap.add_argument("--speed-scale", type=float, default=1.0,
                     help="scale the target cruising speed (lower = more control margin)")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     SCENARIOS["lane_keeping_md"].speed_scale = args.speed_scale

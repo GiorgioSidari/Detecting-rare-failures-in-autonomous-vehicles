@@ -1,27 +1,20 @@
 """
-Test del confronto cross-simulatore.
+Tests for the cross-simulator comparison of `pipeline.cross_simulator`.
 
-On synthetic data with known ground truth: what is tested is the comparison
-logic, not the backends. That is the point -- a comparison that is wrong would
-produce wrong conclusions about campaigns that took hours, and the error would
-only show if the result were obviously absurd.
+They run on synthetic campaigns with known ground truth, so what is checked is
+the comparison logic and not the backends: the Spearman correlation on a pair of
+QoI vectors, the failure-region overlap, and the reported failure rates.
 
-The most important cases are the ones where the comparison must **refuse** to
-produce a number: designs that are not shared, degenerate backends, different
-operating points. A meaningless number is worse than no number, because it
-ends up in the report.
+A second group covers the cases in which the comparison must refuse to produce a
+number rather than return one: designs that are not shared between the two
+campaigns, a degenerate backend (no failures or all failures), and campaigns
+collected at different operating points.
 """
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 
 from pipeline.cross_simulator import (          # noqa: E402
     CrossSimulatorComparison,

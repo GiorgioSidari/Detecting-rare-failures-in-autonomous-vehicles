@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-Operational envelope of the lane keeper: P(failure) vs METERS-PER-STEER.
+Operational envelope of the lane keeper: P(failure) against metres per steering
+decision.
 
-Central finding of the analysis: after the unit fix, failures are governed not by nominal
-speed but by the SPATIAL CONTROL RESOLUTION -- the metres the car travels between two steering
-decisions (= speed / control rate). Speed is only a proxy, confounded by the control rate
-(which varies with machine load).
+Metres per step is `speed / control_rate`, the distance covered between two
+consecutive control decisions. What the script does:
 
-This script measures it cleanly:
-  1. run several conditions (different max speeds) to SPAN the meters-per-step range;
-  2. POOL every valid run, each with its measured meters-per-step and its outcome;
-  3. bin by meters-per-step and compute P(failure) per bin (with Wilson CI);
-  4. print the table, save the P-vs-(m/step) curve, and derive the threshold and the CONTROL-RATE
-     REQUIREMENT (to drive at a target speed you need rate >= speed / threshold).
+  1. runs several conditions (different maximum speeds) so that the runs span a
+     range of metres-per-step values;
+  2. pools every valid run, each with its measured metres-per-step and its
+     outcome;
+  3. bins the pooled runs by metres-per-step and computes P(failure) per bin
+     with a Wilson confidence interval;
+  4. prints the table, saves the P-vs-metres-per-step curve, and derives the
+     threshold together with the control rate it implies for a target speed
+     (`rate >= speed / threshold`).
 
-The fidelity gate is forced OFF here: we do NOT want to drop under-sampled runs, we want them
-as the high-m/step points of the curve.
+The fidelity gate is forced OFF, so under-sampled runs are kept and appear as
+the high-metres-per-step points of the curve instead of being dropped.
 
 Usage:
     python scripts/envelope_lanekeeping.py --workers 4
     python scripts/envelope_lanekeeping.py --speeds 4,5,6,8,10,12 --n 40 --min-speed 3
     python scripts/envelope_lanekeeping.py --out envelope.png --csv envelope.csv
 
-Prerequisites: simulator containers running. Tip: keep the machine idle (other apps closed) so
-the control rate does not fluctuate during collection.
+Prerequisites: simulator containers running. On Udacity the control rate depends
+on machine load, so it varies with what else is running during collection.
 """
 from __future__ import annotations
 
@@ -56,7 +58,7 @@ def build_bounds(max_speed: float, min_speed_cap: float):
     return lo, up
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Operational envelope: P(failure) vs meters-per-steer.")
     ap.add_argument("--speeds", default="4,5,6,8,10,12",
                     help="max speeds (m/s) used to span m/step (default 4,5,6,8,10,12)")
@@ -68,6 +70,11 @@ def main() -> None:
     ap.add_argument("--bins", type=int, default=8, help="number of m/step bins (default 8)")
     ap.add_argument("--out", default="envelope.png", help="curve PNG path (default envelope.png)")
     ap.add_argument("--csv", default=None, help="also save per-run points to this CSV")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if args.workers is not None:

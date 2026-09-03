@@ -1,31 +1,29 @@
 """
-Active-learning of the failure BOUNDARY (Step B).
+Active learning of the failure boundary.
 
-Where run() (severity) and run_rare_event() (rarity via Cross-Entropy) give a
-list of crashes and a probability, this module learns *where and why* a scenario
-fails: a probabilistic model P(fail | theta) over the parameter space, refined by
-sampling adaptively near the fail/safe boundary. It is the generalisation of the
-hand-found meters-per-steer envelope into a method that discovers the boundary
-in the full parameter space with few simulations.
+The module fits a probabilistic model of `P(fail | theta)` over the parameter
+space and refines it by sampling near the fail/safe boundary.
 
-Method
-------
+Components
+----------
 - Surrogate: a Gaussian Process REGRESSOR on the continuous safety margin
-  g(theta) (more informative than the binary label). P(fail|theta) =
-  Phi((thr - mu(theta)) / sigma(theta)), the probability that the margin is
-  below the failure threshold.
-- Active loop: seed with LHS, fit the GP, then pick the next batch where the
-  classification is most uncertain (P ~ 0.5), with a diversity penalty so the
-  batch spreads along the boundary. Evaluate on the real scenario, refit, repeat.
-- P(failure) under the ODD: Monte-Carlo integrate P(fail|theta) against the
-  operational distribution (scenario.param_distributions). A credible interval
-  comes from GP posterior samples (captures model uncertainty), not just MC noise.
-- Feature importance: ARD length-scales of the fitted RBF kernel — a short
-  length-scale on a dimension means the failure is sensitive to it.
+  `g(theta)`. The failure probability at a point is read off the posterior as
+  `P(fail | theta) = Phi((threshold - mu(theta)) / sigma(theta))`.
+- Active loop: a seed design drawn by LHS, then repeatedly -- fit the GP, score
+  a pool of candidates by the binary entropy of `P(fail | theta)` (maximal at
+  `P = 0.5`), apply a diversity penalty so the selected batch spreads out, run
+  the batch on the scenario, refit.
+- Failure probability under the ODD: `P(fail | theta)` is integrated by Monte
+  Carlo against the operational distribution
+  (`scenario.param_distributions`). The credible interval is obtained from
+  posterior samples of the GP, so it includes the surrogate's uncertainty and
+  not only the Monte-Carlo error.
+- Feature importance: the ARD length-scales of the fitted RBF kernel, one per
+  parameter.
 
-Backend-agnostic: uses only the BaseScenario interface (param_bounds,
-param_distributions, run_simulation, compute_qoi, failure_threshold), so it runs
-on the Unity lane-keeping scenario (the real Udacity DNN) exactly as on any other.
+The module uses only the `BaseScenario` interface (`param_bounds`,
+`param_distributions`, `run_simulation`, `compute_qoi`, `failure_threshold`), so
+it runs against any registered scenario.
 """
 from __future__ import annotations
 
@@ -50,7 +48,7 @@ class ActiveBoundaryResult:
     model: object = None                       # fitted GP (for inspection)
 
 
-def _build_gp(d: int):
+def build_gp(d: int):
     from sklearn.gaussian_process import GaussianProcessRegressor
     from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
     # Wide bounds so irrelevant dimensions can take a large length-scale (and
@@ -63,7 +61,7 @@ def _build_gp(d: int):
                                     n_restarts_optimizer=4, alpha=1e-8)
 
 
-def _rbf_lengthscales(kernel, d: int) -> np.ndarray:
+def rbf_lengthscales(kernel, d: int) -> np.ndarray:
     """Walk a composite kernel to find the RBF length_scale array."""
     from sklearn.gaussian_process.kernels import RBF
     stack = [kernel]
@@ -78,13 +76,13 @@ def _rbf_lengthscales(kernel, d: int) -> np.ndarray:
     return np.ones(d)
 
 
-def _p_fail(mu: np.ndarray, sigma: np.ndarray, thr: float) -> np.ndarray:
+def failure_probability(mu: np.ndarray, sigma: np.ndarray, thr: float) -> np.ndarray:
     """P(margin < thr) under the GP predictive Gaussian."""
     sigma = np.maximum(sigma, 1e-9)
     return norm.cdf((thr - mu) / sigma)
 
 
-def _greedy_diverse(scores: np.ndarray, X: np.ndarray, k: int,
+def greedy_diverse(scores: np.ndarray, X: np.ndarray, k: int,
                     min_dist: float) -> list:
     """Pick k high-score points, penalising ones close to already-picked (in the
     unit cube) so the batch spreads along the boundary rather than clustering."""
@@ -105,7 +103,7 @@ def _greedy_diverse(scores: np.ndarray, X: np.ndarray, k: int,
     return picked[:k]
 
 
-def _evaluate(scenario, theta: np.ndarray):
+def evaluate_batch(scenario, theta: np.ndarray):
     """Run the scenario on theta (M,d) and return (margins, valid_mask)."""
     traj = scenario.run_simulation(theta)
     margins = np.asarray(scenario.compute_qoi(traj, theta), dtype=float)
@@ -156,18 +154,16 @@ def run_active_boundary(
     names = bounds["names"]
     span = np.where((upper - lower) > 0, upper - lower, 1.0)
 
-    def to_unit(theta):
+    def to_unit(theta: np.ndarray):
         return (theta - lower) / span
 
-    def from_unit(u):
+    def from_unit(u: np.ndarray):
         return u * span + lower
-
-    rng = np.random.default_rng(seed)
 
     # ── 1. Seed with LHS ──────────────────────────────────────────────────────
     seed_unit = LatinHypercube(d=d, seed=seed).random(n=n_seed)
     theta = from_unit(seed_unit)
-    margins, valid = _evaluate(scenario, theta)
+    margins, valid = evaluate_batch(scenario, theta)
 
     X_all = theta[valid]
     y_all = margins[valid]
@@ -179,20 +175,20 @@ def run_active_boundary(
     # ── 2. Active-learning iterations ─────────────────────────────────────────
     # provide uncertainty + predict the margin
     for it in range(n_iter):
-        gp = _build_gp(d)
+        gp = build_gp(d)
         gp.fit(to_unit(X_all), y_all)
 
         # Candidate pool (cheap: model-only predictions).
         pool_u = LatinHypercube(d=d, seed=seed + 100 + it).random(n=pool_size)
         mu, sigma = gp.predict(pool_u, return_std=True)
-        p = _p_fail(mu, sigma, thr)
+        p = failure_probability(mu, sigma, thr)
         # Acquisition: classification entropy, maximal at the boundary (P~0.5).
         eps = 1e-9
         entropy = -(p * np.log(p + eps) + (1 - p) * np.log(1 - p + eps))
-        picks = _greedy_diverse(entropy, pool_u, batch, min_dist=0.5 / d ** 0.5)
+        picks = greedy_diverse(entropy, pool_u, batch, min_dist=0.5 / d ** 0.5)
 
         new_theta = from_unit(pool_u[picks])
-        m_new, v_new = _evaluate(scenario, new_theta)
+        m_new, v_new = evaluate_batch(scenario, new_theta)
         X_all = np.vstack([X_all, new_theta[v_new]])
         y_all = np.concatenate([y_all, m_new[v_new]])
         if verbose:
@@ -201,7 +197,7 @@ def run_active_boundary(
                   f"total={len(y_all)}  cumulative failure rate={fr:.2%}", flush=True)
 
     # ── 3. Final fit ──────────────────────────────────────────────────────────
-    gp = _build_gp(d)
+    gp = build_gp(d)
     gp.fit(to_unit(X_all), y_all)
 
     # ── 4. P(failure) under the ODD (or uniform) with a credible interval ─────
@@ -218,7 +214,7 @@ def run_active_boundary(
 
     Xq = to_unit(odd_theta)
     mu_q, sig_q = gp.predict(Xq, return_std=True)
-    p_point = _p_fail(mu_q, sig_q, thr)
+    p_point = failure_probability(mu_q, sig_q, thr)
     p_fail = float(np.mean(p_point))
 
     # Credible interval from GP posterior function samples (model uncertainty).
@@ -232,7 +228,7 @@ def run_active_boundary(
         p_ci = (max(0.0, p_fail - 1.96 * se), min(1.0, p_fail + 1.96 * se))
 
     # ── 5. Feature importance (ARD length-scales) ─────────────────────────────
-    ls = _rbf_lengthscales(gp.kernel_, d)
+    ls = rbf_lengthscales(gp.kernel_, d)
     inv = 1.0 / np.maximum(ls, 1e-9)
     importance = inv / inv.sum()
 

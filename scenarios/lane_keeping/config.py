@@ -110,6 +110,36 @@ MIN_CONTROL_HZ      = float(os.getenv("LK_MIN_CONTROL_HZ", "0"))       # Hz; 0 =
 MAX_METERS_PER_STEP = float(os.getenv("LK_MAX_METERS_PER_STEP", "0"))  # m/step; 0 = off
 
 
+def _post_and_poll(url: str, payload: dict, idx: int) -> dict:
+    """
+    Submit one simulation to a container and wait for its result.
+
+    The timeout is per JOB, not per batch: a container stuck on Unity fails its
+    own job in ~90 s instead of freezing everything behind it.
+    """
+    resp = requests.post(f"{url}/simulate", json=payload, timeout=10)
+    if not resp.ok:
+        raise RuntimeError(
+            f"POST /simulate failed on {url} ({resp.status_code}).\n"
+            f"Payload: {payload}\nResponse: {resp.text}"
+        )
+    job_id = resp.json()["jobId"]
+    deadline = time.time() + DEFAULT_TIMEOUT
+    while time.time() < deadline:
+        poll = requests.get(f"{url}/simulate/{job_id}", timeout=10).json()
+        status = poll.get("status")
+        if status == "done":
+            return poll
+        if status == "error":
+            raise RuntimeError(
+                f"Simulator error ({url}) job {job_id}: {poll.get('error')}")
+        time.sleep(POLL_INTERVAL)
+    raise TimeoutError(
+        f"Job {job_id} on {url} did not finish within {DEFAULT_TIMEOUT}s "
+        f"(sample #{idx + 1}). The container may be stuck on Unity."
+    )
+
+
 class LaneKeepingScenario(BaseScenario):
     """
     Lane-keeping scenario driven by the Udacity DNN autopilot.
@@ -201,7 +231,7 @@ class LaneKeepingScenario(BaseScenario):
         for url in self.simulator_urls:
             if url in self._quarantined:
                 if verbose:
-                    print(f"[pool] {url} in quarantena da un batch precedente — ignorato",
+                    print(f"[pool] {url} quarantined by an earlier batch -- skipped",
                           flush=True)
                 continue
             try:
@@ -210,7 +240,7 @@ class LaneKeepingScenario(BaseScenario):
                     healthy.append(url)
                 elif verbose:
                     print(f"[pool] {url} answers but is not healthy "
-                          f"({r.status_code}) — ignorato", flush=True)
+                          f"({r.status_code}) -- skipped", flush=True)
             except requests.RequestException:
                 if verbose:
                     print(f"[pool] {url} unreachable -- skipped", flush=True)
@@ -219,14 +249,14 @@ class LaneKeepingScenario(BaseScenario):
     def probe_workers(self, timeout: float = 60.0, prune: bool = True,
                       verbose: bool = True) -> dict:
         """
-        Send ONE trivial simulation to each worker and see which actually finish.
+        Send one trivial simulation to each worker and report which ones complete it.
 
-        GET /health only proves the FastAPI layer is alive; a container whose Unity
-        instance is hung passes it and then swallows every job. Before a campaign
-        that costs hours, one real job per container is worth the minute it takes.
+        `GET /health` answers from the FastAPI layer alone, so a container whose Unity
+        instance is hung passes it and then accepts jobs without finishing them. This
+        sends a real job instead.
 
-        prune : drop the workers that fail from self.simulator_urls, so the rest of
-                the session simply never talks to them.
+        prune : remove the workers that fail from `self.simulator_urls`, so the rest of
+                the session does not dispatch to them.
 
         Returns {url: "ok" | "<error>"}.
         """
@@ -299,22 +329,20 @@ class LaneKeepingScenario(BaseScenario):
 
     def param_distributions(self, lower=None, upper=None) -> list:
         """
-        REALISTIC operational distribution for each parameter, truncated to the effective bounds
-        (lower/upper, which may come from a preset or the sweep).
+        Operational distribution of each parameter, truncated to the effective bounds
+        (`lower` / `upper`, which may come from a preset or from the sweep).
 
-        Returns a list of FROZEN scipy.stats distributions, one per dimension, supported on
-        [lower_j, upper_j]. Used for distribution-aware sampling ('realistic' mode in
-        pipeline.orchestrator): transforming LHS samples with dist.ppf() weights scenarios by how
-        likely they are in real driving, so the failure fraction becomes an estimate of P(failure)
-        under the ODD instead of a fraction over uniform sampling.
+        Returns a list of FROZEN scipy.stats distributions, one per dimension,
+        supported on `[lower_j, upper_j]`. They are used by the distribution-aware
+        sampling path ('realistic' mode in `pipeline.orchestrator`), which transforms
+        LHS samples through `dist.ppf()`, and by every estimator that weights a
+        scenario by its operational density.
 
-        METHODOLOGICAL NOTE: the shapes here are a PLAUSIBLE starting point, to be calibrated from
-        real data/literature before drawing final numbers.
-          - angles (0-4): more mass on gentle curves (truncated half-normal, mode at the lower
-            bound): sharp curves are rare in real driving.
-          - speeds (5,6): truncated normal centred on a cruising value (~40% of the range): one
-            drives more often at intermediate speeds than at the extremes.
-          - seg_length (7), map_size (8): uniform (no strong prior).
+        Shapes returned:
+          - angles (0-4): truncated half-normal with its mode at the lower bound, so
+            most of the mass sits on gentle curves;
+          - speeds (5, 6): truncated normal centred at about 40% of the range;
+          - seg_length (7), map_size (8): uniform.
         """
         from scipy import stats
         b = self.param_bounds()
@@ -324,7 +352,7 @@ class LaneKeepingScenario(BaseScenario):
         def _uniform(a, c):
             return stats.uniform(loc=a, scale=max(c - a, 1e-9))
 
-        def _truncnorm(a, c, mu, sigma):
+        def _truncnorm(a, c, mu: np.ndarray, sigma: np.ndarray):
             if sigma <= 0 or c <= a:
                 return _uniform(a, c)
             return stats.truncnorm((a - mu) / sigma, (c - mu) / sigma,
@@ -344,47 +372,19 @@ class LaneKeepingScenario(BaseScenario):
 
     # ── Simulation ────────────────────────────────────────────────────────────
 
-    def run_simulation(self, params: np.ndarray, verbose: bool = False) -> np.ndarray:
+    def _dispatch_jobs(self, payloads: list, workers: list, params: np.ndarray,
+                       verbose: bool) -> tuple:
         """
-        Submit N simulation jobs to a POOL of SimulatorServer containers and collect results.
+    Run every job across the worker pool, with retries and quarantine.
 
-        Each container runs its simulations sequentially (one Unity instance per container).
-        Parallelism comes from distributing jobs across containers: with W healthy workers the
-        throughput is ~Wx a single container. Jobs are pulled from a shared queue (dynamic load
-        balancing: faster containers process more).
+    One thread per container, all pulling from a shared queue, so a slower container
+    takes fewer jobs. A job that exhausts its retries is recorded as lost instead of
+    raising, and a container that keeps failing is quarantined for the rest of the
+    batch.
 
-        Each job has an INDIVIDUAL timeout (DEFAULT_TIMEOUT), not a global N*timeout deadline: a
-        container stuck on Unity fails only its own job in ~90s instead of freezing the whole batch.
-
-        Returns
-        -------
-        trajectories : (N, T_max, 4)  float32, zero-padded to the longest run.
-            Channel 0 - x position (m)
-            Channel 1 - y position (m)
-            Channel 2 - cross-track error XTE (m)
-            Channel 3 - steering angle (normalised)
-
-        Side-effect: stores actual run lengths in self._run_lengths so that compute_qoi() can
-        ignore zero-padded timesteps.
-        """
-        N     = params.shape[0]
-        ncols = params.shape[1]
-        payloads = [self._build_payload(row, ncols) for row in params]
-
-        # Pool: keep only the workers that respond to /health.
-        workers = self._healthy_workers(verbose=verbose)
-        if not workers:
-            raise RuntimeError(
-                "Nessun simulatore raggiungibile. Avvia opensbt-core, es.:\n"
-                "  cd opensbt-core && "
-                "docker compose -f docker-compose.parallel.yml up --build\n"
-                f"URL tentati: {self.simulator_urls}\n"
-                "(set NUM_WORKERS or SIMULATOR_URLS to change the pool)."
-            )
-        if verbose:
-            ports = ", ".join(u.split(":")[-1] for u in workers)
-            print(f"[pool] {len(workers)} worker attivi (porte: {ports})", flush=True)
-
+    Returns ``(results_ordered, job_errors)``, both indexed by sample.
+    """
+        N = len(payloads)
         # Shared work queue: one thread per worker. Each thread owns ONE container and loops:
         # take an index, POST the job to that container, wait for the result (poll), move on. So
         # each container has at most 1 queued job: no hidden server-side serialisation.
@@ -401,28 +401,7 @@ class LaneKeepingScenario(BaseScenario):
         pool_lock = threading.Lock()
 
         def _run_one(url: str, idx: int) -> dict:
-            resp = requests.post(f"{url}/simulate", json=payloads[idx], timeout=10)
-            if not resp.ok:
-                raise RuntimeError(
-                    f"POST /simulate fallita su {url} ({resp.status_code}).\n"
-                    f"Payload: {payloads[idx]}\nRisposta: {resp.text}"
-                )
-            job_id = resp.json()["jobId"]
-            deadline = time.time() + DEFAULT_TIMEOUT      # per-job timeout
-            while time.time() < deadline:
-                poll = requests.get(f"{url}/simulate/{job_id}", timeout=10).json()
-                status = poll.get("status")
-                if status == "done":
-                    return poll
-                if status == "error":
-                    raise RuntimeError(
-                        f"Errore simulatore ({url}) job {job_id}: {poll.get('error')}"
-                    )
-                time.sleep(POLL_INTERVAL)
-            raise TimeoutError(
-                f"Job {job_id} on {url} did not finish within {DEFAULT_TIMEOUT}s "
-                f"(sample #{idx + 1}). The container may be stuck on Unity."
-            )
+            return _post_and_poll(url, payloads[idx], idx)
 
         def _give_up_or_retry(url: str, idx: int, exc: BaseException) -> None:
             """Re-queue a failed sample, or record it as lost once retries run out."""
@@ -433,10 +412,10 @@ class LaneKeepingScenario(BaseScenario):
                     task_q.put(idx)
                 else:
                     job_errors[idx] = f"{type(exc).__name__}: {exc}"
-                tag = "riprovo" if retry else "ABBANDONATO"
-                print(f"  [!] sample #{idx + 1} su {url.split(':')[-1]}: "
-                      f"{type(exc).__name__} — {tag} "
-                      f"(tentativo {attempts[idx]}/{MAX_JOB_RETRIES + 1})", flush=True)
+                tag = "retrying" if retry else "GIVEN UP"
+                print(f"  [!] sample #{idx + 1} on port {url.split(':')[-1]}: "
+                      f"{type(exc).__name__} -- {tag} "
+                      f"(attempt {attempts[idx]}/{MAX_JOB_RETRIES + 1})", flush=True)
 
         def _quarantine(url: str) -> bool:
             """Drop a repeatedly failing worker, unless it is the last one standing."""
@@ -477,9 +456,9 @@ class LaneKeepingScenario(BaseScenario):
                             row     = params[idx]
                             print(
                                 f"  [{completed:2d}/{N}] (sample #{idx+1:2d} @ "
-                                f"porta {url.split(':')[-1]})"
-                                f"  angoli=[{','.join(f'{int(round(a)):2d}' for a in row[:5])}]"
-                                f"  →  {L} step,  XTE max={max_xte:.3f}m",
+                                f"port {url.split(':')[-1]})"
+                                f"  angles=[{','.join(f'{int(round(a)):2d}' for a in row[:5])}]"
+                                f"  ->  {L} steps,  XTE max={max_xte:.3f}m",
                                 flush=True,
                             )
                 except (TimeoutError, RuntimeError, requests.RequestException) as exc:
@@ -516,25 +495,18 @@ class LaneKeepingScenario(BaseScenario):
                 except (TimeoutError, RuntimeError, requests.RequestException) as exc:
                     job_errors[idx] = f"{type(exc).__name__}: {exc}"
 
-        n_ok = sum(r is not None for r in results_ordered)
-        if n_ok == 0:
-            distinct = sorted(set(job_errors.values()))[:3]
-            raise RuntimeError(
-                f"None of the {N} simulations succeeded on {len(workers)} "
-                f"workers. Typical errors:\n  "
-                + "\n  ".join(distinct)
-                + "\nCheck the containers (docker ps / docker logs): a stuck Unity "
-                  "instance answers /health but never completes a job."
-            )
-        if job_errors:
-            print(f"  [!] {len(job_errors)}/{N} simulations lost after "
-                  f"{MAX_JOB_RETRIES} retries: marked invalid and excluded "
-                  f"from the rates.", flush=True)
+        return results_ordered, job_errors
 
-        self._n_job_failures = len(job_errors)
-        self._last_job_errors = dict(job_errors)
-        results = results_ordered
+    @staticmethod
+    def _telemetry_from_results(results: list) -> tuple:
+        """
+        Turn the servers' replies into per-run trajectories and fidelity.
 
+        The server returns parallel arrays -- positions [x,y,z], xtes, steerings,
+        one entry per iteration -- not a list of per-step dicts.
+
+        Returns ``(all_stats, control_hz, meters_per_step, infer_ms, wait_ms)``.
+        """
         # Build all_stats from the parallel results. The server returns parallel arrays — positions
         # [x,y,z], xtes, steerings, one entry per iteration — not a list of per-step dicts.
         all_stats = []
@@ -588,6 +560,79 @@ class LaneKeepingScenario(BaseScenario):
             else:
                 infer_ms.append(float("nan"))
                 wait_ms.append(float("nan"))
+
+        return all_stats, control_hz, meters_per_step, infer_ms, wait_ms
+
+    def run_simulation(self, params: np.ndarray, verbose: bool = False) -> np.ndarray:
+        """
+        Submit N simulation jobs to a POOL of SimulatorServer containers and collect
+        the results.
+
+        Each container runs its simulations sequentially (one Unity instance per
+        container); parallelism comes from distributing jobs across containers. Jobs
+        are pulled from a shared queue, so a faster container processes more of them.
+
+        Each job carries its own timeout (DEFAULT_TIMEOUT) rather than the batch
+        sharing a single deadline, so a container stuck on Unity fails only its own
+        job.
+
+        Helpers: `_dispatch_jobs` runs the worker pool, `_post_and_poll` submits one
+        job and polls it to completion, `_telemetry_from_results` assembles the arrays
+        below.
+
+        Returns
+        -------
+        trajectories : (N, T_max, 4) float32, zero-padded to the longest run.
+            Channel 0 - x position (m)
+            Channel 1 - y position (m)
+            Channel 2 - cross-track error XTE (m)
+            Channel 3 - steering angle (normalised)
+
+        Side effect: stores the actual run lengths in `self._run_lengths`, which
+        `compute_qoi()` uses to ignore the zero-padded timesteps.
+        """
+        N     = params.shape[0]
+        ncols = params.shape[1]
+        payloads = [self._build_payload(row, ncols) for row in params]
+
+        # Pool: keep only the workers that respond to /health.
+        workers = self._healthy_workers(verbose=verbose)
+        if not workers:
+            raise RuntimeError(
+                "No simulator reachable. Start opensbt-core, e.g.:\n"
+                "  cd opensbt-core && "
+                "docker compose -f docker-compose.parallel.yml up --build\n"
+                f"URLs tried: {self.simulator_urls}\n"
+                "(set NUM_WORKERS or SIMULATOR_URLS to change the pool)."
+            )
+        if verbose:
+            ports = ", ".join(u.split(":")[-1] for u in workers)
+            print(f"[pool] {len(workers)} active workers (ports: {ports})", flush=True)
+
+        results_ordered, job_errors = self._dispatch_jobs(
+            payloads, workers, params, verbose)
+
+        n_ok = sum(r is not None for r in results_ordered)
+        if n_ok == 0:
+            distinct = sorted(set(job_errors.values()))[:3]
+            raise RuntimeError(
+                f"None of the {N} simulations succeeded on {len(workers)} "
+                f"workers. Typical errors:\n  "
+                + "\n  ".join(distinct)
+                + "\nCheck the containers (docker ps / docker logs): a stuck Unity "
+                  "instance answers /health but never completes a job."
+            )
+        if job_errors:
+            print(f"  [!] {len(job_errors)}/{N} simulations lost after "
+                  f"{MAX_JOB_RETRIES} retries: marked invalid and excluded "
+                  f"from the rates.", flush=True)
+
+        self._n_job_failures = len(job_errors)
+        self._last_job_errors = dict(job_errors)
+        results = results_ordered
+
+        (all_stats, control_hz, meters_per_step, infer_ms,
+         wait_ms) = self._telemetry_from_results(results)
 
         # Build the zero-padded trajectory tensor (N, T_max, 4). Zero-padding is safe for the POD
         # embedder (SVD handles zeros). self._run_lengths lets compute_qoi() mask out padded

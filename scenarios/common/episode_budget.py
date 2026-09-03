@@ -1,53 +1,29 @@
 """
-How long an episode may last: a per-scenario budget, not a global constant.
+Episode horizon derived from the scenario.
 
-The problem
------------
-With a fixed `max_steps` the horizon is a constant in STEPS, but what matters
-for lane keeping is how much ROAD is covered -- and that depends on the
-scenario's speed and on the backend's control rate. Measured on the 60-point LHS
-design:
+:func:`budget_seconds` returns
 
-    backend      scale   v (m/s)  horizon   covered   coverage
-    MetaDrive    0.3625    5.40      30 s      162 m      ~80%
-    Udacity      0.4200    6.25      30 s      187 m      ~92%
+    clamp( length / target_speed * MARGIN, MIN_SECONDS, MAX_SECONDS )
 
-and those are optimistic estimates: they assume the target speed all the way.
-Measuring directly at scale=0.15 gives 26% where the arithmetic predicted 33,
-because the car accelerates gradually and slows down in curves.
+with `MARGIN = 1.5`, `MIN_SECONDS = 10` and `MAX_SECONDS = 120`, i.e. the time
+needed to cover `length` at `target_speed`, scaled by the margin and clamped.
+The margin covers the difference between the target speed and the speed
+actually held, which on the measured designs is about 79% of nominal.
 
-Three consequences:
+The budget is expressed in simulated seconds, which is the unit shared by
+backends running at different control rates. :func:`budget_steps` converts it to
+a number of steps for a given `control_hz`, rounding up.
 
-  * the two backends drive DIFFERENT PORTIONS of the same road, so the
-    comparison stays confounded even once the geometry is identical;
-  * `angle_5` is almost never reached, and `angle_4` only partly -- which alone
-    explains why the diagnostics attributed to it 33-43% of the influence of the
-    strongest angle: it is not less important, it is less driven;
-  * the failure rate is measured on a truncated road, so it underestimates the
-    rate on the full track.
-
-The rule
---------
-The budget is derived from the scenario: time to cover the road at the target
-speed, multiplied by a margin, and capped from above.
-
-The margin is needed because the target speed is a target, not a fact: between
-the initial acceleration and slowing in curves the car covers about 79% of the
-nominal distance (26% measured against 33% predicted). That calls for
-1/0.79 ~ 1.27; we use 1.5 so as not to truncate precisely the curviest
-scenarios, which are the interesting ones.
-
-The cap keeps a very slow scenario from generating endless episodes: at that
-point the run should be declared uninformative, not made to last forever.
-
-The budget does NOT replace termination on road completion: it is the safety net
-for the case where the car does not reach the end. The normal exit must be "I
-finished the road", otherwise the horizon goes back to being a hidden
-variable.
+The budget is the cap for a run that never reaches the end of the road; a run
+that completes the road terminates on that condition first.
 """
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:                      # numpy is imported lazily below, so the
+    import numpy as np                 # module stays importable without it
 
 # Margin on the nominal time (see above: measured ~1.27, rounded up).
 MARGIN = 1.5
@@ -92,7 +68,7 @@ def budget_steps(length_m: float, target_speed_ms: float, control_hz: float,
     return int(math.ceil(budget_seconds(length_m, target_speed_ms, **kw) * hz))
 
 
-def polyline_length(xy) -> float:
+def polyline_length(xy: np.ndarray) -> float:
     """Arc length of a polyline `(M, 2)`."""
     import numpy as np
 

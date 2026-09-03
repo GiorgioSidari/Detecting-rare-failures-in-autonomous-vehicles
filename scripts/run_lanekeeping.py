@@ -30,13 +30,15 @@ REALISTIC_LOWER = [0,  0,  0,  0,  0,   5.0,  9.0, 20.0, 200.0]
 REALISTIC_UPPER = [45, 45, 45, 45, 45,  8.0, 14.0, 40.0, 350.0]
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of the lane-keeping run."""
     ap = argparse.ArgumentParser(description="Run the lane_keeping pipeline with a clear report.")
     ap.add_argument("--n", type=int, default=20, help="number of LHS samples (default 20)")
     ap.add_argument("--workers", type=int, default=None,
                     help="number of parallel containers/workers (default: NUM_WORKERS env or 4)")
     ap.add_argument("--seed", type=int, default=42, help="seed (default 42)")
-    ap.add_argument("--scenario", default="lane_keeping", help="name scenario (default lane_keeping)")
+    ap.add_argument("--scenario", default="lane_keeping",
+                    help="scenario name (default lane_keeping)")
     ap.add_argument("--preset", choices=["full", "realistic"], default="full",
                     help="'full' = spazio esteso completo (ODD ampio); "
                          "'realistic' = the proposed realistic ODD (plausible angles/speeds)")
@@ -61,6 +63,11 @@ def main() -> None:
                     help="'realistic' = sample from the operational distribution (ppf): the "
                          "failure fraction estimates P(failure) under the ODD; "
                          "'uniform' = LHS uniforme sui bound (baseline)")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     # NUM_WORKERS must be set BEFORE importing the pipeline: the pool is built at scenarios/ import.
@@ -183,7 +190,7 @@ def main() -> None:
     print(f" P(failure)          : {p_fail*100:5.1f}%   [{odd_lbl}]"
           f"   ({n_fail}/{n_valid} falliti){ci_txt}")
     # Severity axis (worst-case).
-    print(f" Worst-case (severita'): bottom-{args.rare_fraction*100:.0f}% = {n_rare}/{n_valid} scenari"
+    print(f" Worst-case (severity): bottom-{args.rare_fraction*100:.0f}% = {n_rare}/{n_valid} scenari"
           f"   | margin: min {mv.min():+.3f} | mediana {np.median(mv):+.3f} | max {mv.max():+.3f}")
     print(f" Modi POD             : {r.pod_n_modes}")
     print(sub)
@@ -273,7 +280,7 @@ def main() -> None:
         xte = t[:Li, 2]; steer = t[:Li, 3]
         xmin, xmax = float(xte.min()), float(xte.max())
         peak = xmax if abs(xmax) >= abs(xmin) else xmin
-        fin = float(xte[-1]); steer_max = float(np.abs(steer).max())
+        steer_max = float(np.abs(steer).max())
         mask = np.abs(xte) > 0.2
         corr = float(np.mean(np.sign(steer[mask]) * np.sign(xte[mask]))) if mask.any() else 0.0
         both = (xmin < -1.0) and (xmax > 1.0)
@@ -295,7 +302,7 @@ def main() -> None:
         side = "XTE+ (positivo)" if peak > 0 else "XTE- (negativo)"
         return f"leaves on the {side} side after {Li} steps -- {mode}{ctx}"
 
-    print(" PERCHE' SONO FALLITI (lettura dai dati):")
+    print(" WHY THEY FAILED (read from the data):")
     for i in rows:
         print(f"   #{int(i):<3d} {_explain(i)}")
     print(line)

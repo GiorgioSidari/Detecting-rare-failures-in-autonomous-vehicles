@@ -1,14 +1,9 @@
 """
-MetaDrive backend driver -- now a plain bridge to the shared module.
+MetaDrive backend driver: re-exports of the shared implementation.
 
-The implementation used to live here. It now lives in
-`scenarios/common/driver.py`, because the same control law drives on Udacity
-too and two copies would make false the assumption the comparison rests on --
-the same controller on different simulators. Bit-for-bit equivalence was
-verified before moving it (0.0 deviation over 300 steps).
-
-Only the re-exports remain, so existing imports keep working. Do not add logic
-here.
+The control law lives in `scenarios/common/driver.py`, which both backends
+import. This module only re-exports `Driver`, `LateralFeedbackDriver` and `_clip` from
+there, so imports written against this path keep working.
 """
 from __future__ import annotations
 

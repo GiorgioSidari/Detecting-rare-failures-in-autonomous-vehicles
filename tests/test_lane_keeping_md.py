@@ -14,7 +14,7 @@ import pytest
 
 # Canonical QoI of this branch: positional run_lengths and a LaneQoIResult
 # dataclass as the result (see scenarios/lane_keeping/qoi.py).
-from scenarios.lane_keeping.qoi import composite_lane_qoi, MAX_XTE
+from scenarios.lane_keeping.qoi import composite_lane_qoi
 from scenarios.lane_keeping_md.map_builder import (
     angle_to_radius, build_scenario_spec, target_speed,
     MIN_RADIUS, STRAIGHT_RADIUS, STRAIGHT_ANGLE_EPS,
@@ -133,9 +133,9 @@ def test_qoi_bad_params_incoherent_speed():
 # ── scenario interface (MetaDrive mocked out) ──────────────────────────────────
 
 class _FakeMDScenario(LaneKeepingMetaDriveScenario):
-    """Overrides the only MetaDrive-coupled method with a deterministic fake."""
     def _simulate_one(self, row, ncols, seed=0, verbose=False):
         # Length grows with the max angle, so runs have different lengths (tests padding).
+        """Overrides the only MetaDrive-coupled method with a deterministic fake."""
         L = 4 + int(row[:5].max() // 20)
         traj = np.zeros((L, 4), dtype=np.float32)
         traj[:, 0] = np.arange(L)                    # x

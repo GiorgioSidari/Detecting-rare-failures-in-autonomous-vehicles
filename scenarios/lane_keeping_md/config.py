@@ -1,40 +1,35 @@
 """
-Lane-keeping scenario on the MetaDrive backend (Step A / variant A1: state-based).
+Lane-keeping scenario on the MetaDrive backend, driven from exact state.
 
-Drop-in alternative to the Unity/Docker LaneKeepingScenario. It implements the
-SAME BaseScenario contract (identical param_bounds and param_distributions, same
-(N, T, 4) trajectory layout [x, y, xte, steering], same composite QoI), so the
-orchestrator, POD, rare_event and the runner scripts work unchanged — you only
-add a registry entry and select `--scenario lane_keeping_md`.
+Implements the same BaseScenario contract as the Unity/Docker
+LaneKeepingScenario -- identical `param_bounds` and `param_distributions`, the
+same (N, T, 4) trajectory layout [x, y, xte, steering], the same composite QoI
+-- so the orchestrator, POD, rare_event and the runner scripts work against
+either backend; selecting this one is a registry entry plus
+`--scenario lane_keeping_md`.
 
-Why this exists (see the design doc): the Unity+Docker+Xvfb stack pins the
-control loop at ~9 Hz because software rendering dominates each step, and makes
-`meters_per_step` depend on machine load (hence the fidelity gate). MetaDrive
-advances the physics by `decision_repeat * physics_world_step_size` per step, so
-the CONTROL RATE IS AN EXACT CONFIG PARAMETER:
+MetaDrive advances the physics by `decision_repeat * physics_world_step_size`
+per step, so the control rate is a configuration parameter:
 
-    control_hz = 1 / (decision_repeat * physics_world_step_size)   # e.g. 5*0.02 -> 10 Hz
+    control_hz = 1 / (decision_repeat * physics_world_step_size)   # 5 * 0.02 -> 10 Hz
 
-That makes `meters_per_step = mean_speed / control_hz` exact and reproducible,
-and lets you SWEEP the control rate as an experimental variable — the whole
-point of the envelope result. The fidelity gate is therefore unnecessary here.
+`meters_per_step = mean_speed / control_hz` follows exactly, and the fidelity
+gate is left off (`min_control_hz=0`, `max_meters_per_step=0`).
 
-A1 uses a state-based LateralFeedbackDriver (no rendering -> headless, no GPU, no
-Docker). A camera-vision driver (A2) can later implement the same Driver.act()
-interface for end-to-end vision testing; the rest of this class is unchanged.
+The vehicle is driven by `LateralFeedbackDriver` on exact state, so the
+environment runs headless with no rendering, no GPU and no Docker. Any object
+implementing the same `Driver.act()` interface can be injected instead.
 
-Imports are at the top, except `metadrive` itself inside `_make_env` and
-`_apply_curve_geometry`: it needs Python < 3.12 and its own venv, and this
-module must stay importable for the geometry tests and the parity gate.
-
-The QoI comes from `scenarios.lane_keeping.qoi`, the Udacity backend's own:
-two definitions of "failure" would diverge silently between backends.
+Imports are at the top except `metadrive` itself, imported inside `_make_env`
+and `_apply_curve_geometry`: it requires Python < 3.12 and its own venv, and
+this module stays importable without it for the geometry tests.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import math
 import time
+import warnings
 
 import numpy as np
 from scipy import stats
@@ -50,6 +45,37 @@ from scenarios.lane_keeping_md.map_builder import (
 from scenarios.lane_keeping_md.scenario_map import centerline, make_online_env
 
 
+def _classify_outcome(last_info: dict, road_finished: bool, traj: np.ndarray) -> str:
+    """
+    Why the episode ended, as one label.
+
+    The cascade is ordered by priority and the LAST match wins:
+    ``max_step`` -> ``arrive_dest`` -> ``strada_completata`` -> ``out_of_road``
+    -> ``crash`` -> the XTE threshold applied to the trajectory's final point.
+    """
+    outcome = "max_step"
+    if last_info.get("arrive_dest") or last_info.get("arrive_destination"):
+        outcome = "arrive_dest"
+    if road_finished:
+        outcome = "strada_completata"
+    if last_info.get("out_of_road"):
+        outcome = "out_of_road"
+    if (last_info.get("crash") or last_info.get("crash_vehicle")
+            or last_info.get("crash_object")):
+        outcome = "crash"
+    if len(traj) and abs(float(traj[-1, 2])) > MAX_XTE:
+        outcome = "out_of_road"
+    return outcome
+
+
+def _metres_per_step(traj: np.ndarray) -> float:
+    """Mean distance travelled between two control decisions, from the path."""
+    if len(traj) < 2:
+        return 0.0
+    d = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1)
+    return float(np.mean(d)) if d.size else 0.0
+
+
 class LaneKeepingMetaDriveScenario(BaseScenario):
     name = "lane_keeping_md"
     description = (
@@ -58,15 +84,6 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
         "reproducible and can be swept directly."
     )
 
-    """
-    Backend instance. `speed_scale` and the driver factory are the OPERATING
-    POINT, not the scenario: declare them next to the results.
-
-    geometry="udacity" (default): the lane is Udacity's Catmull-Rom centreline,
-    handed to ScenarioOnlineEnv as an explicit polyline -- the only mode in which
-    "same theta = same road" holds. "pgblock" is legacy, kept to reproduce old
-    campaigns: it collapses the 5 angles into their mean.
-    """
     def __init__(
         self,
         decision_repeat: int = 5,
@@ -78,6 +95,17 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
         geometry: str = "udacity",
     ):
         # Control rate = 1 / (decision_repeat * physics_world_step_size).
+        """
+        Backend instance.
+
+        `speed_scale` multiplies the target cruising speed and, together with the
+        driver factory, defines the operating point.
+
+        `geometry="udacity"` (default) builds the lane from the Catmull-Rom
+        centreline, handed to ScenarioOnlineEnv as an explicit polyline.
+        `geometry="pgblock"` uses MetaDrive's native blocks, which collapse the five
+        angles into their mean.
+        """
         self.decision_repeat = int(decision_repeat)
         self.physics_world_step_size = float(physics_world_step_size)
         self.max_steps = int(max_steps)
@@ -121,18 +149,18 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
         # Orizzonte in steps dell'episodio corrente (modalita' "udacity").
         self._budget_steps: int = int(max_steps)
 
-    """Exact by construction: 1 / (5 * 0.02) = 10 Hz. Not a measurement."""
     @property
     def control_hz_nominal(self) -> float:
+        """Exact by construction: 1 / (5 * 0.02) = 10 Hz. Not a measurement."""
         return 1.0 / (self.decision_repeat * self.physics_world_step_size)
 
     # ── Parameter space (identical to LaneKeepingScenario) ────────────────────
 
-    """
-    The ODD box. Identical to LaneKeepingScenario's: without that, "the same
-    scenario on two simulators" would not even be definable.
-    """
     def param_bounds(self) -> dict:
+        """
+        The ODD box: lower and upper bound of each of the nine parameters, the same
+        values LaneKeepingScenario declares.
+        """
         return {
             "names": [
                 "angle_1 (°)", "angle_2 (°)", "angle_3 (°)",
@@ -145,13 +173,13 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
             "upper": np.array([85, 85, 85, 85, 85, 15.0, 30.0, 40.0, 350.0]),
         }
 
-    """
-    Operational marginals: what is FREQUENT, where param_bounds says what is
-    POSSIBLE. Angles peak on the lower bound (gentle curves are common), speeds
-    at 40% of the band, geometry uniform. This is what makes "rare" mean
-    something: with everything equally likely, no failure would be rare.
-    """
     def param_distributions(self, lower=None, upper=None) -> list:
+        """
+        The operational marginals: how likely each value is inside the box.
+
+        Angles peak on the lower bound, speeds at 40% of their band, geometry
+        parameters are uniform. Rarity in `arm_ranking` is defined against these.
+        """
         b = self.param_bounds()
         lo = np.asarray(lower if lower is not None else b["lower"], dtype=float)
         hi = np.asarray(upper if upper is not None else b["upper"], dtype=float)
@@ -159,7 +187,7 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
         def _uniform(a, c):
             return stats.uniform(loc=a, scale=max(c - a, 1e-9))
 
-        def _truncnorm(a, c, mu, sigma):
+        def _truncnorm(a, c, mu: np.ndarray, sigma: np.ndarray):
             if sigma <= 0 or c <= a:
                 return _uniform(a, c)
             return stats.truncnorm((a - mu) / sigma, (c - mu) / sigma, loc=mu, scale=sigma)
@@ -176,22 +204,22 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
                 dists.append(_uniform(a, c))
         return dists
 
-    """The margin is built so that zero is the boundary. Not a tunable."""
     def failure_threshold(self) -> float:
+        """The margin is built so that zero is the boundary. Not a tunable."""
         return 0.0
 
     # ── Simulation ────────────────────────────────────────────────────────────
 
-    """
-    N episodes -> zero-padded trajectories (N, T, 4): [x, y, xte, steering], the
-    same layout Udacity produces. Seed = row index, so the pipeline is
-    deterministic given (arm, seed).
-
-    Real lengths go to self._run_lengths: a padded zero in the xte channel reads
-    as "dead centre", so compute_qoi must mask it or a run that ended early would
-    look like flawless driving.
-    """
     def run_simulation(self, params: np.ndarray, verbose: bool = False) -> np.ndarray:
+        """
+        N episodes -> zero-padded trajectories (N, T, 4): [x, y, xte, steering], the
+        same layout Udacity produces. Seed = row index, so the pipeline is
+        deterministic given (arm, seed).
+
+        Real lengths are stored in `self._run_lengths`, which `compute_qoi` uses to
+        mask the padding: a padded zero in the xte channel would otherwise read as
+        dead-centre driving.
+        """
         params = np.asarray(params, dtype=float)
         N, ncols = params.shape
 
@@ -229,11 +257,13 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
                 traj_tensor[i, :n, :] = a
         return traj_tensor
 
-    """
-    Processes, not threads: each episode builds its own physics engine. Results
-    are reordered BY INDEX -- otherwise row i would stop matching theta row i.
-    """
-    def _run_parallel(self, params, ncols, verbose):
+    def _run_parallel(self, params: np.ndarray, ncols: int, verbose: bool):
+        """
+        Run the episodes on a process pool and return them keyed by row index.
+
+        Each episode builds its own physics engine, so the pool uses processes. The
+        results are reordered by index before returning.
+        """
         results = [None] * params.shape[0]
         with concurrent.futures.ProcessPoolExecutor(max_workers=self.n_jobs) as ex:
             futs = {ex.submit(self._simulate_one, params[i], ncols, i, False): i
@@ -244,21 +274,17 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
 
     # ── QoI (shared composite metric) ─────────────────────────────────────────
 
-    """
-    Safety margin per run, from the SHARED metric. Negative = failure.
-
-    `composite_lane_qoi` is the Udacity backend's own function, untouched: it is
-    the common premise of every arm and both backends.
-
-    Fidelity gate off: on Udacity it discarded runs whose control rate had
-    drifted, because the rate was emergent. Here it is exact -- nothing to
-    discard, and policing it would be theatre.
-
-    MetaDrive's own out_of_road/crash overrides our margin: a lane-relative XTE
-    saturates once the car is out of the lane. The forced value is ordered by
-    severity so failures do not all collapse onto one number.
-    """
     def compute_qoi(self, trajectories: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """
+        Safety margin per run, from the shared metric. Negative = failure.
+
+        `composite_lane_qoi` is imported from the Udacity backend and used unchanged,
+        with the fidelity gate off (`min_control_hz=0`, `max_meters_per_step=0`).
+
+        When MetaDrive reports `out_of_road` or `crash` for a run, its margin is
+        forced negative: the value is `-0.001 - (1 - fraction of the budget survived)`,
+        so earlier failures score lower than late ones.
+        """
         res = composite_lane_qoi(
             trajectories,
             self._run_lengths,
@@ -273,7 +299,7 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
         qoi = np.asarray(res.qoi, dtype=float)
         N = trajectories.shape[0]
 
-        def _tail(arr):
+        def _tail(arr: np.ndarray):
             if arr is None:
                 return None
             arr = np.asarray(arr, dtype=float)
@@ -305,19 +331,17 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
 
     # ── MetaDrive glue (lazy import; verify attr names vs installed version) ───
 
-    """
-    Headless env for one scenario. Isolated so tests can monkeypatch it. In
-    "udacity" mode `row` is mandatory: the road comes from theta, not from spec.
-
-    The centreline is translated by -poly[0] because MetaDrive recentres the
-    scene on the ego's start; without it the lateral error would be the distance
-    from the absolute origin.
-
-    The budget is computed HERE and not in the loop: `horizon` is a MetaDrive
-    config and MetaDrive truncates on its own, so a wider budget has no effect --
-    the bug that left steps stuck at 300 with a budget of 561.
-    """
     def _make_env(self, spec: ScenarioSpec, seed: int, row=None):
+        """
+        Build the headless environment for one scenario.
+
+        In "udacity" mode `row` is required: the road is generated from theta. The
+        centreline is translated by `-poly[0]` because MetaDrive recentres the scene
+        on the ego's start position.
+
+        The episode budget is computed here and passed to MetaDrive as `horizon`,
+        which is where the simulator applies its own truncation.
+        """
         if self.geometry == "udacity":
             if row is None:
                 raise ValueError(
@@ -342,14 +366,14 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
         self._apply_curve_geometry(spec)      # make our angles actually shape the road
         return MetaDriveEnv(self._build_md_config(spec, seed))
 
-    """
-    Legacy "pgblock" path only. MetaDrive samples each Curve block's radius per
-    seed, so our angle parameters were inert; this overrides
-    Curve.PARAMETER_SPACE with a fixed radius/angle/length, leaving `dir` free so
-    the road still winds both ways. Global per-episode override, safe
-    sequentially and on a process pool.
-    """
     def _apply_curve_geometry(self, spec: ScenarioSpec) -> None:
+        """
+        Legacy "pgblock" path only. MetaDrive samples each Curve block's radius per
+        seed, so our angle parameters were inert; this overrides
+        Curve.PARAMETER_SPACE with a fixed radius/angle/length, leaving `dir` free so
+        the road still winds both ways. Global per-episode override, safe
+        sequentially and on a process pool.
+        """
         radii = [b.radius for b in spec.blocks if b.kind == "C"]
         if not radii:
             return                                    # all-straight: nothing to shape
@@ -366,15 +390,19 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
             base[Parameter.angle] = ConstantSpace(angle_deg)
             base[Parameter.length] = ConstantSpace(seg)
             Curve.PARAMETER_SPACE = ParameterSpace(base)
-        except Exception as e:                            # API drift: fail loud, don't crash
-            print(f"[geometry] curve override failed ({e}); angles remain inert", flush=True)
+        except Exception as e:
+            # The scenario still runs, but with the angles ignored, so the
+            # warning has to reach the caller even when nothing is verbose.
+            warnings.warn(f"curve override failed ({e}); the angles of theta "
+                          f"remain inert on this scenario", RuntimeWarning,
+                          stacklevel=2)
 
-    """
-    MetaDrive config dict for the legacy "pgblock" path. Per-block radius control
-    depends on the installed map API; the block string plus headless and
-    traffic-free is the portable core.
-    """
     def _build_md_config(self, spec: ScenarioSpec, seed: int) -> dict:
+        """
+        MetaDrive config dict for the legacy "pgblock" path. Per-block radius control
+        depends on the installed map API; the block string plus headless and
+        traffic-free is the portable core.
+        """
         block_str = spec.block_string() or "S"
         return {
             "use_render": False,               # headless: no window
@@ -389,23 +417,19 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
             "log_level": 50,                   # quiet
         }
 
-    """
-    The contract between backend and controller: lateral and heading error,
-    speed, position, end-of-road flag -- all SI, none of it dependent on how the
-    simulator represents lanes. Same dictionary the Udacity arm builds from
-    telemetry, which is why one controller file drives on both.
-
-    The XTE comes from `road_frame` on the shared centreline, NOT from
-    ScenarioLane.local_coordinates. That returns the opposite sign (measured
-    -8.530 against +8.530, and the car steered the wrong way), but the reason is
-    the second one: the quantity that defines failure must be measured
-    identically on every backend, or a difference between them can come from the
-    measurement instead of the dynamics.
-
-    `beyond_end` means the projection has clamped to the last vertex: the caller
-    must end the run. The else branch serves the legacy "pgblock" mode.
-    """
     def _extract_state(self, env) -> dict:
+        """
+        The state dictionary the controller consumes.
+
+        Carries lateral error, heading error, speed, position and the end-of-road
+        flag, all in SI units and independent of how the simulator represents lanes;
+        the Udacity arm builds the same dictionary from its telemetry.
+
+        In "udacity" geometry the errors come from `road_frame` on the shared
+        centreline. `beyond_end` is true when the projection has clamped to the last
+        vertex, and the caller ends the run. The else branch serves the legacy
+        "pgblock" mode, where the errors come from MetaDrive's lane API.
+        """
         vehicle = getattr(env, "agent", None) or getattr(env, "vehicle", None)
 
         if self.geometry == "udacity" and self._local_centerline is not None:
@@ -454,43 +478,21 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
             "x": float(pos[0]), "y": float(pos[1]),
         }
 
-    """
-    One episode -> (traj (L, 4), fidelity). Isolated so tests can override it.
+    def _drive_episode(self, env, driver, tgt: float, budget: int) -> tuple:
+        """
+        Drive one episode: read, decide, execute, until something ends it.
 
-    The horizon is a per-scenario budget, already computed by _make_env and given
-    to MetaDrive: with a fixed max_steps the two backends drove ~80% and ~92% of
-    the same road, and angle_5 was almost never reached.
-
-    state["dt"] is exact (decision_repeat * physics_world_step_size). Without it
-    the shared controller falls back on 20 Hz while MetaDrive runs at 10, so it
-    would have half the steering authority of the other backends.
-
-    Four ways to end: MetaDrive's own termination, |xte| over MAX_XTE, the road
-    being over -- the NORMAL exit, since past the end the error grows because the
-    road finished and continuing would manufacture failures -- and the step
-    budget, which is the safety net and not the normal exit.
-
-    The outcome cascade is ordered by priority, last match wins: our end-of-road
-    beats arrive_dest (MetaDrive derives the destination from the ego track,
-    which need not end on the centreline), and out_of_road/crash beat both.
-    """
-    def _simulate_one(self, row: np.ndarray, ncols: int, seed: int = 0,
-                      verbose: bool = False):
-        spec = build_scenario_spec(row, ncols)
-        tgt = target_speed(spec) * self.speed_scale
-        driver: Driver = self._driver_factory()
-        driver.reset()
-
-        env = self._make_env(spec, seed, row=row)
-
-        budget = self._budget_steps if self.geometry == "udacity" else self.max_steps
-
+        One iteration is one control decision, i.e. `decision_repeat` physics
+        steps. Returns ``(traj, last_info, road_finished, infer_t, wait_t)``,
+        where `traj` is the list of [x, y, lateral_error, steering] rows and the
+        two times split the loop into deciding and simulating.
+        """
         traj = []
         infer_t, wait_t = 0.0, 0.0
         last_info: dict = {}
         road_finished = False
         try:
-            reset_out = env.reset()
+            env.reset()
             done = False
             steps = 0
             # One iteration = one control decision = 0.1 s of simulated time.
@@ -542,28 +544,39 @@ class LaneKeepingMetaDriveScenario(BaseScenario):
                 env.close()
             except Exception:
                 pass
+        return traj, last_info, road_finished, infer_t, wait_t
+
+    def _simulate_one(self, row: np.ndarray, ncols: int, seed: int = 0,
+                      verbose: bool = False):
+        """
+        One episode -> (traj (L, 4), fidelity).
+
+        The horizon is the per-scenario budget computed by `_make_env`, and
+        `state["dt"]` is `decision_repeat * physics_world_step_size`, which the shared
+        controller uses to convert its per-second limits.
+
+        An episode ends on any of four conditions: MetaDrive's own termination,
+        |xte| above MAX_XTE, the road being over (`beyond_end`, the normal exit), or
+        the step budget running out. `fidelity` carries control_hz, meters_per_step,
+        the per-step timings and the outcome label.
+        """
+        spec = build_scenario_spec(row, ncols)
+        tgt = target_speed(spec) * self.speed_scale
+        driver: Driver = self._driver_factory()
+        driver.reset()
+
+        env = self._make_env(spec, seed, row=row)
+
+        budget = self._budget_steps if self.geometry == "udacity" else self.max_steps
+
+        traj, last_info, road_finished, infer_t, wait_t = self._drive_episode(
+            env, driver, tgt, budget)
 
         traj = np.asarray(traj, dtype=np.float32).reshape(-1, 4)
         L = traj.shape[0]
-        # Outcome cascade: last match wins. Priority explained in the docstring.
-        outcome = "max_step"
-        if last_info.get("arrive_dest") or last_info.get("arrive_destination"):
-            outcome = "arrive_dest"
-        if road_finished:
-            outcome = "strada_completata"
-        if last_info.get("out_of_road"):
-            outcome = "out_of_road"
-        if last_info.get("crash") or last_info.get("crash_vehicle") or last_info.get("crash_object"):
-            outcome = "crash"
-        if L and abs(float(traj[-1, 2])) > MAX_XTE:
-            outcome = "out_of_road"
+        outcome = _classify_outcome(last_info, road_finished, traj)
         hz = self.control_hz_nominal
-        # meters_per_step from the exact per-step travelled distance.
-        if L >= 2:
-            d = np.linalg.norm(np.diff(traj[:, :2], axis=0), axis=1)
-            mps = float(np.mean(d)) if d.size else 0.0
-        else:
-            mps = 0.0
+        mps = _metres_per_step(traj)
         fidelity = {
             "control_hz": hz,                 # exact, constant by construction
             "meters_per_step": mps,           # exact: mean metres between decisions

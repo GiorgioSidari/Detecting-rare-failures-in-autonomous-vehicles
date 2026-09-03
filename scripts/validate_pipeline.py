@@ -177,12 +177,17 @@ def run_validation(label: str, use_nn: bool, n_samples: int, seed: int) -> bool:
 # Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="End-to-end pipeline validation")
     parser.add_argument("--n",    type=int, default=500, help="Number of LHS samples (default 500)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--physics-only", action="store_true",
                         help="Skip NN validation even if model exists")
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
 
     results = []
@@ -210,7 +215,7 @@ def main():
         else:
             print(f"\n{YELLOW}[NN SIMULATOR]{RESET}  Skipped — model not found at:")
             print(f"  {_DEFAULT_MODEL_PATH}")
-            print(f"  Run:  python -m scenarios.emergency_braking.train")
+            print("  Run:  python -m scenarios.emergency_braking.train")
 
     # ── Final summary ─────────────────────────────────────────────────────────
     print(f"\n{BOLD}{'═'*60}{RESET}")

@@ -2,41 +2,20 @@
 """
 Merge the raw arrays of two or more campaigns into a single campaign file.
 
-Why this exists
----------------
-Some comparisons span campaigns. The 2x2 control design -- acquisition
-(entropy | random) crossed with sampling design (lhs | random) -- was run as
-two campaigns of three arms each: `cmp_md12_ctrl` and `cmp_md12_ctrl_rand`.
-The second was decided only after the first had been read, and each costs two
-hours of simulator time, so re-running six arms together was not an option.
+`rank_arms.py` can only pair arms that appear in the same `.npz`, so arms run
+in separate campaigns have to be merged into one file before they can be
+compared.
 
-The consequence is that NO single .npz holds `active_boundary[lhs+randacq]`
-and `active_boundary[random+randacq]` at the same time, and `rank_arms.py`
-can only pair arms it finds in one file. The comparison that answers "does
-the LHS stratification contribute anything once the model is off?" therefore
-had no file to run on.
+The script writes nothing unless both checks below pass:
 
-When merging is legitimate, and when it is not
-----------------------------------------------
-Never merge on trust. Two campaigns are comparable only if they ran the same
-simulator at the same operating point over the same ODD, and the way to prove
-it is not to read the metadata but to check that the arms they have in common
-with a REFERENCE campaign reproduce, seed by seed: same arm, same seed, same
-everything => the same multiset of safety margins.
-
-The multiset, not the array: the execution order of the (arm, seed) runs is
-shuffled per campaign, so the points are stored in a different order. What
-must match is which margins were produced for each seed, not where they sit
-in the file.
-
-This script refuses to write anything unless
-
-  1. the input campaigns declare identical `metadata` (backend, operating
-     point, budget, seeds), and
-  2. every arm shared with `--verify-against` reproduces per seed.
-
-A campaign that fails either check is not a campaign that can be compared,
-and merging it would bury a session drift inside a p-value.
+  1. every input campaign declares identical `metadata` (backend, operating
+     point, budget, seeds);
+  2. with `--verify-against <reference.npz>`, every arm an input has in common
+     with the reference reproduces seed by seed -- for each (arm, seed) pair the
+     multiset of safety margins must match. The comparison is on the multiset
+     and not on the array, because the execution order of the (arm, seed) runs
+     is shuffled per campaign, so the same margins are stored in a different
+     order.
 
 Usage
 -----
@@ -162,7 +141,8 @@ def verify(merged: dict, ref_path: str, atol: float) -> None:
               f"{len(set(a['seeds'].tolist()))} seeds")
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
+    """The command line of this script."""
     ap = argparse.ArgumentParser(
         description="Merge campaign raw files into one, if they are comparable.")
     ap.add_argument("inputs", nargs="+", help="the <prefix>_raw.npz files to merge")
@@ -180,6 +160,11 @@ def main() -> None:
     ap.add_argument("--atol", type=float, default=1e-9,
                     help="absolute tolerance on the margins (default 1e-9: the "
                          "pipeline is deterministic, this is float noise only)")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     if len(args.inputs) < 2:

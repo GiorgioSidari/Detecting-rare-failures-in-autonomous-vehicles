@@ -1,17 +1,16 @@
 """
-Rigira UNA simulazione con il rendering acceso, per mostrarla.
+Replay ONE simulation with rendering on, so it can be watched.
 
-Le campagne girano headless: del singolo episodio resta il numero, non il
-filmato. Questo script riapre il `.npz` di una campagna, sceglie il fallimento
-peggiore (margine minimo) di una configurazione, e rigira QUEL solo scenario in
-una finestra MetaDrive.
+Campaigns run headless: of a single episode only the number survives, not the
+footage. This script reopens a campaign's `.npz`, picks one arm's worst failure
+(lowest margin) and replays THAT scenario alone in a MetaDrive window.
 
-Nota: e' una dimostrazione, non una misura. Il rendering non cambia la fisica
-(la frequenza di controllo resta 1/(decision_repeat * physics_world_step_size)),
-ma il margine puo' differire nell'ultima cifra rispetto alla campagna se la
-versione di MetaDrive installata non e' la stessa.
+It is a demonstration, not a measurement. Rendering does not change the physics
+(the control rate stays 1/(decision_repeat * physics_world_step_size)), but the
+margin can differ in the last digit from the campaign if the installed MetaDrive
+version is not the same.
 
-Uso:
+Usage:
     python scripts/replay_worst.py results/cmp_md12_full_raw.npz
     python scripts/replay_worst.py results/cmp_md12_full_raw.npz --arm active_boundary[lhs]
     python scripts/replay_worst.py results/cmp_md12_full_raw.npz --list
@@ -35,7 +34,7 @@ from scenarios.lane_keeping_md.scenario_map import (                           #
 
 def make_online_env_render(row, *, decision_repeat, physics_world_step_size,
                            max_steps, seed=0):
-    """Come scenario_map.make_online_env, ma con la finestra aperta."""
+    """Same as scenario_map.make_online_env, but with the window open."""
     from metadrive.engine.asset_loader import AssetLoader
     from metadrive.envs.scenario_env import ScenarioOnlineEnv
     from metadrive.policy.env_input_policy import EnvInputPolicy
@@ -43,7 +42,7 @@ def make_online_env_render(row, *, decision_repeat, physics_world_step_size,
 
     sd = ScenarioDescription(build_scenario_description(row, scenario_id=f"replay_{seed}"))
     env = ScenarioOnlineEnv(dict(
-        use_render=True,                 # <-- l'unica differenza
+        use_render=True,                 # <-- the only difference
         image_observation=False,
         agent_policy=EnvInputPolicy,
         data_directory=AssetLoader.file_path("nuscenes", unix_style=False),
@@ -62,11 +61,11 @@ def make_online_env_render(row, *, decision_repeat, physics_world_step_size,
 
 
 class RenderingScenario(LaneKeepingMetaDriveScenario):
-    """Identico allo scenario delle campagne: cambia solo l'ambiente costruito."""
 
     def _make_env(self, spec, seed, row=None):
+        """Identical to the campaign scenario: only the environment differs."""
         if row is None:
-            raise ValueError("serve `row`: la strada nasce dai parametri")
+            raise ValueError("`row` is required: the road comes from the parameters")
         poly = centerline(row)
         self._local_centerline = poly - poly[0]
         self._budget_steps = budget_steps(
@@ -89,22 +88,29 @@ def load(npz_path):
     return out, names
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("npz")
     ap.add_argument("--arm", default=None,
-                    help="configurazione da cui pescare (default: la prima che contiene 'active_boundary')")
+                    help="arm to pick from (default: the first one whose label\n"
+                         "contains 'active_boundary')")
     ap.add_argument("--rank", type=int, default=0,
-                    help="0 = il peggiore, 1 = il secondo peggiore, ...")
+                    help="0 = the worst, 1 = the second worst, ...")
     ap.add_argument("--speed-scale", type=float, default=0.3625,
-                    help="DEVE essere quello della campagna, altrimenti non e' lo stesso esperimento")
-    ap.add_argument("--list", action="store_true", help="elenca le configurazioni e esci")
+                    help="MUST match the campaign, otherwise this is a different\n"
+                         "experiment")
+    ap.add_argument("--list", action="store_true", help="list the arms and exit")
+    return ap
+
+
+def main():
+    ap = _build_parser()
     args = ap.parse_args()
 
     clouds, names = load(args.npz)
 
     if args.list:
-        print(f"{'configurazione':<40}{'punti':>8}{'fallimenti':>12}{'peggiore':>10}")
+        print(f"{'arm':<40}{'points':>8}{'failures':>12}{'worst':>10}")
         for lab, (th, mg) in clouds.items():
             finite = np.isfinite(mg)
             print(f"{lab:<40}{int(finite.sum()):>8}{int((mg[finite] < 0).sum()):>12}"
@@ -115,25 +121,25 @@ def main():
     if arm is None:
         arm = next((l for l in clouds if "active_boundary" in l), list(clouds)[0])
     if arm not in clouds:
-        sys.exit(f"configurazione '{arm}' assente. Disponibili:\n  " + "\n  ".join(clouds))
+        sys.exit(f"arm '{arm}' not in this file. Available:\n  " + "\n  ".join(clouds))
 
     theta, margins = clouds[arm]
     order = np.argsort(np.where(np.isfinite(margins), margins, np.inf))
     idx = int(order[args.rank])
     row = theta[idx]
 
-    print(f"configurazione : {arm}")
-    print(f"scenario       : indice {idx} nella nuvola, margine {margins[idx]:.4f}")
+    print(f"arm        : {arm}")
+    print(f"scenario   : index {idx} in the cloud, margin {margins[idx]:.4f}")
     if names:
-        print("parametri      : " + ", ".join(f"{n}={v:.2f}" for n, v in zip(names, row)))
+        print("parameters : " + ", ".join(f"{n}={v:.2f}" for n, v in zip(names, row)))
     else:
-        print("parametri      : " + np.array2string(row, precision=2))
-    print(f"speed_scale    : {args.speed_scale}")
-    print("\nchiudi la finestra per terminare.\n")
+        print("parameters : " + np.array2string(row, precision=2))
+    print(f"speed_scale: {args.speed_scale}")
+    print("\nclose the window to stop.\n")
 
     sc = RenderingScenario(speed_scale=args.speed_scale, geometry="udacity", n_jobs=1)
     traj, fid = sc._simulate_one(np.asarray(row, float), ncols=len(row), seed=0, verbose=True)
-    print(f"\npassi={traj.shape[0] if hasattr(traj,'shape') else len(traj)}  "
+    print(f"\nsteps={traj.shape[0] if hasattr(traj,'shape') else len(traj)}  "
           f"esito={fid.get('outcome')}  "
           f"control_hz={fid.get('control_hz'):.1f}  "
           f"m/step={fid.get('meters_per_step'):.3f}")

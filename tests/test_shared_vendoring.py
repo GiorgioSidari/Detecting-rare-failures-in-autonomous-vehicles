@@ -1,21 +1,14 @@
 """
-Locks down the vendored copies of the shared components.
+Checks the vendored copies of the shared components.
 
-`opensbt-core/Simulator/shared/` holds copies of `scenarios/common/`, because the
-containers' build context is `opensbt-core/` and Docker cannot copy from outside
-it.
+`opensbt-core/Simulator/shared/` holds copies of the files in
+`scenarios/common/`, because the containers' build context is `opensbt-core/`
+and Docker cannot copy from outside it.
 
-A copy without a guardrail is debt that surfaces in the wrong place: if the
-driver inside the container diverged from the one outside, the C2 arm would be
-comparing two different controllers while claiming to compare one, and
-la differenza verrebbe attribuita al simulatore.
-
-These tests compare **file hashes**, not behaviour: a stricter criterion, and
-the right one for a copy -- there must be no
-differenza, nemmeno un commento.
-
-If they fail: you changed one of the two sides. Re-copy from
-`scenarios/common/`, do not loosen the test.
+The tests compare the file HASHES of each pair, so any difference fails,
+including a comment or a blank line. A failure means one of the two sides was
+edited: copy the file from `scenarios/common/` to
+`opensbt-core/Simulator/shared/` again.
 """
 from __future__ import annotations
 
@@ -45,15 +38,15 @@ def test_copy_is_identical(name):
     src = os.path.join(_SOURCE, name)
     dst = os.path.join(_VENDORED, name)
 
-    assert os.path.isfile(src), f"manca l'originale {src}"
+    assert os.path.isfile(src), f"the original {src} is missing"
     assert os.path.isfile(dst), (
         f"the copy {dst} is missing. Regenerate it with:\n"
         f"  cp scenarios/common/{name} opensbt-core/Simulator/shared/{name}"
     )
     assert _sha(src) == _sha(dst), (
         f"{name} diverges between scenarios/common/ and Simulator/shared/.\n"
-        f"Il container userebbe un controller diverso da quello del confronto.\n"
-        f"Rigenera la copia:\n"
+        f"The container would use a different controller from the comparison.\n"
+        f"Regenerate the copy:\n"
         f"  cp scenarios/common/{name} opensbt-core/Simulator/shared/{name}"
     )
 

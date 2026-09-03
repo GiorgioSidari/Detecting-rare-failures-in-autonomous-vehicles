@@ -7,6 +7,11 @@ controller, compared head to head on two simulators at a matched budget.
 (Italian). It is the document to read: everything below is how to run the code
 that produced it.
 
+**How the three search algorithms work** — plain sampling, cross-entropy and
+active boundary, from first principles — is
+[`docs/algoritmi_di_campionamento.md`](docs/algoritmi_di_campionamento.md)
+(Italian). Start there if the names in the table below are new.
+
 ---
 
 ## The research question
@@ -55,7 +60,8 @@ pipeline/                           # the algorithms under comparison
   rare_event_random.py              # ... as an arm, with either design
   model_comparison.py               # campaign harness: every arm at a matched budget
   arm_ranking.py                    # rarity metric, paired tests, pre-registered sequence
-  failure_regions.py                # DBSCAN regions, axis_spread, structure_score
+  failure_regions.py                # DBSCAN regions, p_hit, structure_score
+  region_comparison.py              # the methods against one shared region map
   operating_point.py                # bisection calibration of speed_scale / obs_lag
   odd_presets.py                    # ODD presets and narrowing rules
   cross_simulator.py                # Udacity <-> MetaDrive comparison on a shared design
@@ -104,8 +110,8 @@ MetaDrive needs neither Docker nor a GPU.
 
 ## Reproducing the campaigns
 
-The exact commands behind every number in the report are in
-`docs/risultati_sperimentazione.md` §11. In short:
+The provenance of every number in the report is in
+`docs/risultati_sperimentazione.md`, Appendix D. The commands:
 
 ```powershell
 # --- MetaDrive campaigns (~1.4-2.0 s per simulation) ---

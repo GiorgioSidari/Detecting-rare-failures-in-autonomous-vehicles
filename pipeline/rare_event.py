@@ -62,13 +62,11 @@ def defensive_sample_count(final_samples: int, alpha: float) -> int:
 def check_defensive_budget(final_samples: int, alpha: float, *, label: str = "",
                            stacklevel: int = 3) -> bool:
     """
-    Warn when the final IS estimate has too few defensive draws to be a
-    probability estimate. Returns True when the budget is adequate.
+    Check whether the final IS estimate has enough defensive draws.
 
-    Deliberately a warning and not an exception: the CE descent is still a
-    legitimate search even when its probability estimate is not usable, and the
-    comparison harness wants the failures it finds. The caller is expected to
-    carry ``p_fail_usable`` forward so the number is never read as an estimate.
+    Returns True when ``int(alpha * final_samples) >= MIN_DEFENSIVE_SAMPLES``, and
+    otherwise emits a warning and returns False. The caller carries the result
+    forward as ``p_fail_usable``.
     """
     n_f = defensive_sample_count(final_samples, alpha)
     if n_f >= MIN_DEFENSIVE_SAMPLES:
@@ -117,18 +115,18 @@ class RareEventResult:
 
 
 def scenario_margin_fn(scenario):
-    """
-    Build a margin(params) -> margins function from a scenario, running the simulator and the
-    QoI (as the orchestrator does). params: (M, d) -> margins (M,). Invalid runs return NaN
-    (handled by compute_qoi) and are filtered downstream.
-    """
     def _margin(params: np.ndarray) -> np.ndarray:
+        """
+        Build a margin(params) -> margins function from a scenario, running the simulator and the
+        QoI (as the orchestrator does). params: (M, d) -> margins (M,). Invalid runs return NaN
+        (handled by compute_qoi) and are filtered downstream.
+        """
         traj = scenario.run_simulation(params)
         return np.asarray(scenario.compute_qoi(traj, params), dtype=float)
     return _margin
 
 
-def _build_q(lo, hi, loc, scale):
+def build_proposal(lo: np.ndarray, hi: np.ndarray, loc: np.ndarray, scale: np.ndarray):
     """Proposal = product of truncated normals on [lo, hi] with (loc, scale) per dimension."""
     scale = np.maximum(scale, 1e-9)
     a = (lo - loc) / scale
@@ -136,7 +134,7 @@ def _build_q(lo, hi, loc, scale):
     return [stats.truncnorm(a[j], b[j], loc=loc[j], scale=scale[j]) for j in range(len(lo))]
 
 
-def _logpdf_product(dists, X):
+def logpdf_product(dists: list, X: np.ndarray):
     """Sum of per-dimension log-pdfs = log of the product density at X (M, d) -> (M,)."""
     lp = np.zeros(X.shape[0])
     for j, d in enumerate(dists):
@@ -144,7 +142,7 @@ def _logpdf_product(dists, X):
     return lp
 
 
-def _sample_product(dists, n, rng, d):
+def sample_product(dists: list, n: int, rng: np.random.Generator, d: int):
     """Draw n points from the product of distributions (shared rng -> independent dims)."""
     X = np.empty((n, d))
     for j in range(d):
@@ -152,7 +150,7 @@ def _sample_product(dists, n, rng, d):
     return X
 
 
-def _bootstrap_ci(h, rng, n_boot=4000):
+def bootstrap_ci(h: np.ndarray, rng: np.random.Generator, n_boot: int = 4000):
     """95% percentile bootstrap CI for the mean of h (per-sample IS contributions)."""
     n = len(h)
     if n == 0:
@@ -162,11 +160,103 @@ def _bootstrap_ci(h, rng, n_boot=4000):
     return (float(np.quantile(boots, 0.025)), float(np.quantile(boots, 0.975)))
 
 
+@dataclass(frozen=True)
+class _CEProblem:
+    """
+    The parts of the estimation that do not change between iterations.
+
+    `margin_fn` evaluates a batch of points, `f_dists` are the nominal
+    marginals, `lo`/`hi` the ODD bounds, `scale_min` the floor on the proposal
+    scale, `threshold` the failure threshold, `rng` the generator and `d` the
+    number of parameters.
+    """
+
+    margin_fn: object
+    f_dists: object
+    lo: np.ndarray
+    hi: np.ndarray
+    scale_min: np.ndarray
+    threshold: float
+    rng: object
+    d: int
+
+
+def _ce_descent(pb: _CEProblem, loc: np.ndarray, scale: np.ndarray, *, samples_per_iter: int,
+                rho: float, max_iter: int, n_eval: int,
+                verbose: bool) -> tuple:
+    """
+    Move the proposal `q` toward the failure region, one elite set at a time.
+
+    Each iteration keeps the worst `rho` fraction of the sampled margins and
+    re-fits `q` on it with importance weights (in log space, stabilised). It
+    stops when the elite quantile reaches the failure threshold, or when too few
+    valid points are left to fit anything.
+
+    Returns ``(loc, scale, gamma_history, n_eval)``.
+    """
+    gamma_hist: list = []
+    for _ in range(max_iter):
+        q = build_proposal(pb.lo, pb.hi, loc, scale)   # current proposal
+        X = sample_product(q, samples_per_iter, pb.rng, pb.d)
+        m = np.asarray(pb.margin_fn(X), dtype=float)
+        n_eval += samples_per_iter
+        ok = np.isfinite(m)
+        Xv, mv = X[ok], m[ok]
+        if mv.size < 2:
+            break
+        gamma = max(float(np.quantile(mv, rho)), pb.threshold)
+        gamma_hist.append(gamma)
+        Xe = Xv[mv <= gamma]
+        if Xe.shape[0] < 2:
+            break
+        # Elite importance weights: the real density over the proposal's.
+        logw = logpdf_product(pb.f_dists, Xe) - logpdf_product(q, Xe)
+        w = np.exp(logw - logw.max())
+        w = w / w.sum() if w.sum() > 0 else np.ones(len(w)) / len(w)
+        loc = np.clip((w[:, None] * Xe).sum(axis=0), pb.lo, pb.hi)
+        scale = np.maximum(
+            np.sqrt((w[:, None] * (Xe - loc) ** 2).sum(axis=0)), pb.scale_min)
+        if verbose:
+            print(f"  [CE] gamma={gamma:+.4f}  elite={Xe.shape[0]}  "
+                  f"eval={n_eval}", flush=True)
+        if gamma <= pb.threshold:
+            break   # failure threshold reached
+    return loc, scale, gamma_hist, n_eval
+
+
+def _defensive_is_estimate(pb: _CEProblem, q, *, alpha: float,
+                           final_samples: int, n_eval: int) -> tuple:
+    """
+    Importance sampling under the defensive mixture `alpha*f + (1-alpha)*q`.
+
+    The mixture bounds the weights by `1/alpha`, which is what keeps the
+    estimator finite once the proposal has drifted away from the nominal
+    distribution. Weights are `f/d = 1 / (alpha + (1-alpha) * q/f)`, computed
+    stably in log space.
+
+    Returns ``(p_hat, ci, weights, fail_flags, n_eval)``.
+    """
+    n_f = int(alpha * final_samples)
+    X = np.vstack([sample_product(pb.f_dists, n_f, pb.rng, pb.d),
+                   sample_product(q, final_samples - n_f, pb.rng, pb.d)])
+    m = np.asarray(pb.margin_fn(X), dtype=float)
+    n_eval += final_samples
+    ok = np.isfinite(m)
+    Xv, mv = X[ok], m[ok]
+
+    log_qf = logpdf_product(q, Xv) - logpdf_product(pb.f_dists, Xv)
+    w = 1.0 / (alpha + (1.0 - alpha) * np.exp(log_qf))
+    fail = (mv < pb.threshold).astype(float)
+    h = fail * w                       # weighted failures
+    p_hat = float(h.mean()) if h.size else 0.0
+    return p_hat, bootstrap_ci(h, pb.rng), w, fail, n_eval
+
+
 def estimate_failure_probability(
     margin_fn,
-    f_dists,
-    lower,
-    upper,
+    f_dists: list,
+    lower: np.ndarray,
+    upper: np.ndarray,
     threshold: float = 0.0,
     samples_per_iter: int = 500,
     rho: float = 0.2,
@@ -208,49 +298,16 @@ def estimate_failure_probability(
     n_eval = 0
     gamma_hist: list = []
 
-    # CE phase: move q toward the failure region.
-    for _ in range(max_iter):
-        q = _build_q(lo, hi, loc, scale)   # current proposal
-        X = _sample_product(q, samples_per_iter, rng, d)
-        m = np.asarray(margin_fn(X), dtype=float)
-        n_eval += samples_per_iter
-        ok = np.isfinite(m)
-        Xv, mv = X[ok], m[ok]
-        if mv.size < 2:
-            break
-        gamma = max(float(np.quantile(mv, rho)), threshold)
-        gamma_hist.append(gamma)
-        Xe = Xv[mv <= gamma]
-        if Xe.shape[0] < 2:
-            break
-        # Elite importance weights for the CE update (stabilised).
-        logw = _logpdf_product(f_dists, Xe) - _logpdf_product(q, Xe)
-        w = np.exp(logw - logw.max())
-        w = w / w.sum() if w.sum() > 0 else np.ones(len(w)) / len(w) #ratio between real density over the final one
-        loc = np.clip((w[:, None] * Xe).sum(axis=0), lo, hi)
-        scale = np.maximum(np.sqrt((w[:, None] * (Xe - loc) ** 2).sum(axis=0)), scale_min)
-        if verbose:
-            print(f"  [CE] gamma={gamma:+.4f}  elite={Xe.shape[0]}  eval={n_eval}", flush=True)
-        if gamma <= threshold:
-            break   # failure threshold reached
+    problem = _CEProblem(margin_fn=margin_fn, f_dists=f_dists, lo=lo, hi=hi,
+                         scale_min=scale_min, threshold=threshold, rng=rng, d=d)
 
-    # Final estimate: importance sampling with defensive mixture d = alpha*f + (1-alpha)*q.
-    q = _build_q(lo, hi, loc, scale)
-    n_f = int(alpha * final_samples)
-    X = np.vstack([_sample_product(f_dists, n_f, rng, d),
-                   _sample_product(q, final_samples - n_f, rng, d)])
-    m = np.asarray(margin_fn(X), dtype=float)
-    n_eval += final_samples
-    ok = np.isfinite(m)
-    Xv, mv = X[ok], m[ok]
-    # weight = f/d = 1 / (alpha + (1-alpha) * q/f), computed stably in log space.
-    # f = realistic distribution density, d= current sampling distribution density
-    log_qf = _logpdf_product(q, Xv) - _logpdf_product(f_dists, Xv)
-    w = 1.0 / (alpha + (1.0 - alpha) * np.exp(log_qf))
-    fail = (mv < threshold).astype(float)
-    h = fail * w    #weighted failures
-    p_hat = float(h.mean()) if h.size else 0.0
-    ci = _bootstrap_ci(h, rng)
+    loc, scale, gamma_hist, n_eval = _ce_descent(
+        problem, loc, scale, samples_per_iter=samples_per_iter, rho=rho,
+        max_iter=max_iter, n_eval=n_eval, verbose=verbose)
+
+    q = build_proposal(lo, hi, loc, scale)
+    p_hat, ci, w, fail, n_eval = _defensive_is_estimate(
+        problem, q, alpha=alpha, final_samples=final_samples, n_eval=n_eval)
 
     return RareEventResult(
         p_fail=p_hat,

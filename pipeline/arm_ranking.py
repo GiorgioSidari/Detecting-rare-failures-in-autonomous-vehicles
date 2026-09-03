@@ -1,54 +1,33 @@
 """
-Rank the search arms by how much RARE-failure information each one produced.
-
-Why this module exists
-----------------------
-``model_comparison`` answers one question well: within a family, does LHS beat
-random? It never answers the other half -- is active boundary worth more than
-cross-entropy, and is either worth more than drawing points at random? Its
-``paired_test`` pairs ``family[lhs]`` against ``family[random]`` and nothing
-else, so two arms from different families are never put side by side.
-
-This module does that comparison, and it defines the quantity being compared,
-because "found more failures" is not the claim anyone wants to make. An arm can
-rack up failures by sitting in the easy part of the domain. What matters is
-failures that a blind draw from the operational distribution would almost never
-produce.
+Rank the search arms by rare-failure yield, and test the ranking.
 
 What "rare" means here
 ----------------------
-A failure at theta is rare when theta itself is unlikely under the ODD. We
-calibrate that against the ODD and nothing else:
+A failure at theta is rare when theta itself is unlikely under the ODD:
 
-  1. draw a large reference sample from the operational distribution f;
-  2. take the q-quantile (default 10%) of its log-density -- ``log_f_cut``;
+  1. a large reference sample is drawn from the operational distribution f;
+  2. the q-quantile (default 10%) of its log-density is ``log_f_cut``;
   3. a failure counts as RARE when ``log f(theta) <= log_f_cut``.
 
-So "rare" reads as: this failure sits in the least likely 10% of the operational
-domain. It is a property of WHERE the failure is, not of which arm found it, so
-it cannot flatter the arm that found it -- which is the whole point. Two things
-follow that are worth stating in any writeup:
+The cut is a property of the ODD, not of the arm that found the failure. It
+follows that campaigns run on different ODDs are not comparable on this metric:
+``rank_arms`` records the bounds it used and ``compare_rankings`` refuses to
+merge two rankings whose bounds differ.
 
-  * the cut is defined by the ODD, so campaigns run on DIFFERENT ODDs are not
-    comparable on this metric. ``rank_arms`` records the bounds it used and
-    ``compare_rankings`` refuses to merge two rankings whose bounds differ.
-  * rarity is not severity. A failure can be deep (very negative margin) and
-    perfectly ordinary, or shallow and extremely unlikely. Both are reported.
+Rarity is independent of severity. A failure can be deep (very negative margin)
+and ordinary, or shallow and extremely unlikely; both are reported.
 
 Ranking and the statistics
 --------------------------
 Arms are ranked on rare failures per 100 simulations, which normalises the
-budget each arm actually spent (the CE descent stops early, so realised budgets
-differ by up to 2x). The ranking is then tested: every pair of arms is compared
-seed by seed, Wilcoxon signed-rank where there are enough seeds and a sign test
-below that, with Holm correction over all pairs. Unpaired means would let
-seed-to-seed variance -- which on this simulator is larger than the difference
-between arms -- masquerade as an effect.
+budget each arm actually spent -- the CE descent stops early, so realised
+budgets differ. Every pair of arms is then compared seed by seed with a Wilcoxon
+signed-rank test (a sign test when Wilcoxon has no power), and the p-values are
+corrected with Holm over all pairs.
 
-The resolution floor applies here exactly as it does in ``paired_test``: with n
-seeds the smallest attainable two-sided p is 2/2^n. At 3 seeds that is 0.25 and
-NOTHING can be significant; the ranking is then a description, not a result.
-``ArmRanking.report`` says so rather than letting the reader assume otherwise.
+With n seeds the smallest attainable two-sided p is 2/2^n: 0.25 at 3 seeds,
+0.00049 at 12. ``ArmRanking`` carries that floor in ``min_attainable_p`` and
+``report`` prints it above the pairwise table.
 
 Usage
 -----
@@ -74,7 +53,7 @@ RARITY_Q = 0.10
 RARITY_REFERENCE_N = 200_000
 
 
-def odd_log_density(theta: np.ndarray, dists) -> np.ndarray:
+def odd_log_density(theta: np.ndarray, dists: list) -> np.ndarray:
     """
     Sum of per-dimension log-pdfs at each row of ``theta`` -- the log-density of
     the product ODD. Points outside the support give -inf, which correctly reads
@@ -94,14 +73,15 @@ def odd_log_density(theta: np.ndarray, dists) -> np.ndarray:
     return lp
 
 
-def rarity_reference(dists, *, q: float = RARITY_Q, n: int = RARITY_REFERENCE_N,
+def rarity_reference(dists: list, *, q: float = RARITY_Q, n: int = RARITY_REFERENCE_N,
                      seed: int = 12345) -> dict:
     """
-    Calibrate the rarity cut on the ODD itself.
+    Calibrate the rarity cut on the ODD.
 
-    Returns the cut and the sorted reference log-densities, so a point can be
-    turned into "the failures this arm found sit at the Xth percentile of
-    operational likelihood" -- a statement a reader can check.
+    Draws `n` points from the marginals, computes their log-densities and returns
+    the q-quantile as ``log_f_cut`` together with the sorted densities, which
+    :func:`odd_percentile` uses to place a point on the operational-likelihood
+    scale.
     """
     rng = np.random.default_rng(seed)
     ref = np.column_stack([d.ppf(np.clip(rng.random(n), 1e-12, 1 - 1e-12))
@@ -179,12 +159,14 @@ class ArmRanking:
                 "pairwise": self.pairwise, "notes": list(self.notes)}
 
     # ── the report ─────────────────────────────────────────────────────────
-    def report(self) -> str:
-        w = 78
+    _WIDTH = 78
+
+    def _header_lines(self) -> list:
+        """Title, what "rare" means here, and the no-failures warning."""
         q = self.rarity["q"]
-        L = ["=" * w,
+        L = ["=" * self._WIDTH,
              " WHICH ARM PRODUCED THE MOST RARE FAILURES",
-             "=" * w,
+             "=" * self._WIDTH,
              f"   rare = failure in the least likely {q * 100:.0f}% of the ODD",
              f"          (log-density cut {self.rarity['log_f_cut']:.3f}, "
              f"calibrated on {self.rarity['n']:,} ODD draws)",
@@ -198,8 +180,12 @@ class ArmRanking:
                   "   and the paired tests are undefined. Check the operating",
                   "   point and the ODD before reading anything into it.",
                   ""]
-        L.append(f" {'#':<3}{'arm':<26}{'sims':>6}{'fails':>7}{'rare':>6}"
-                 f"{'rare/100':>10}{'worst':>8}{'ODD pct':>9}{'excl':>6}")
+        return L
+
+    def _table_lines(self) -> list:
+        """The leaderboard itself, plus the legend of its columns."""
+        L = [f" {'#':<3}{'arm':<26}{'sims':>6}{'fails':>7}{'rare':>6}"
+             f"{'rare/100':>10}{'worst':>8}{'ODD pct':>9}{'excl':>6}"]
         for i, s in enumerate(self.scores, 1):
             L.append(f" {i:<3}{s.label:<26}{s.n_points:>6}{s.n_failures:>7}"
                      f"{s.n_rare:>6}{s.rare_per_100:>10.2f}"
@@ -212,11 +198,16 @@ class ArmRanking:
               "            (lower = the arm works further out in the tail)",
               "   excl     failure regions no other arm reached",
               ""]
+        return L
 
-        # ── the statistics, and their ceiling ──────────────────────────────
-        L.append("-" * w)
-        L.append(" IS THE ORDER REAL? paired seed by seed, Holm-corrected")
-        L.append("-" * w)
+    def _power_lines(self) -> list:
+        """
+        The number of seeds and the smallest p they can attain.
+
+        Printed above the pairwise table, and replaced by an explanation when no
+        paired test could run at all.
+        """
+        L = []
         if not self.pairwise and self.n_seeds < 2:
             L.append(f"   only {self.n_seeds} seed(s): a paired test needs at")
             L.append("   least 2. The per-seed provenance IS recorded -- add")
@@ -234,29 +225,43 @@ class ArmRanking:
         else:
             L.append(f"   {self.n_seeds} seeds. Smallest attainable two-sided p: "
                      f"{self.min_attainable_p:.3f}")
+        return L
+
+    def _pairwise_lines(self) -> list:
+        """Every pair, raw p and Holm-corrected p, marking the ones that hold."""
+        if not self.pairwise:
+            return []
         sig = self.significant_pairs()
-        if self.pairwise:
-            L.append("")
-            L.append(f"   {'pair':<48}{'wins':>7}{'p':>9}{'p Holm':>9}")
-            for k, v in sorted(self.pairwise.items(),
-                               key=lambda kv: kv[1].get("p_holm", 1.0)):
-                mark = "  *" if k in sig else ""
-                name = k if len(k) <= 48 else k[:45] + "..."
-                w_ = f"{v['wins']}/{v['n']}"
-                L.append(f"   {name:<48}{w_:>7}"
-                         f"{v['p_value']:>9.3f}{v['p_holm']:>9.3f}{mark}")
-            L.append("")
-            if sig:
-                L.append("   * = survives the correction. These are the only")
-                L.append("   orderings you can defend.")
-            else:
-                L.append("   No pair survives the correction: the arms are not")
-                L.append("   distinguishable at this number of seeds. That is a")
-                L.append("   statement about the power, not about the arms.")
+        L = ["", f"   {'pair':<48}{'wins':>7}{'p':>9}{'p Holm':>9}"]
+        for k, v in sorted(self.pairwise.items(),
+                           key=lambda kv: kv[1].get("p_holm", 1.0)):
+            mark = "  *" if k in sig else ""
+            name = k if len(k) <= 48 else k[:45] + "..."
+            wins = f"{v['wins']}/{v['n']}"
+            L.append(f"   {name:<48}{wins:>7}"
+                     f"{v['p_value']:>9.3f}{v['p_holm']:>9.3f}{mark}")
+        L.append("")
+        if sig:
+            L.append("   * = survives the correction. These are the only")
+            L.append("   orderings you can defend.")
+        else:
+            L.append("   No pair survives the correction: the arms are not")
+            L.append("   distinguishable at this number of seeds. That is a")
+            L.append("   statement about the power, not about the arms.")
+        return L
+
+    def report(self) -> str:
+        """The whole ranking as printable text: leaderboard, then evidence."""
+        L = self._header_lines() + self._table_lines()
+        L.append("-" * self._WIDTH)
+        L.append(" IS THE ORDER REAL? paired seed by seed, Holm-corrected")
+        L.append("-" * self._WIDTH)
+        L += self._power_lines()
+        L += self._pairwise_lines()
         for n in self.notes:
             L.append("")
             L.append("   NOTE: " + n)
-        L.append("=" * w)
+        L.append("=" * self._WIDTH)
         return "\n".join(L)
 
 
@@ -298,101 +303,95 @@ def _holm(pairs: dict) -> None:
         v.setdefault("p_holm", float("nan"))
 
 
-def rank_arms(clouds: dict, lower, upper, dists, *, threshold: float = 0.0,
-              cloud_seeds: dict | None = None, regions=None,
-              per_arm: dict | None = None, q: float = RARITY_Q,
-              reference_n: int = RARITY_REFERENCE_N, reference_seed: int = 12345,
-              metric: str = "rare_per_100") -> ArmRanking:
+def _score_one_arm(label: str, theta: np.ndarray, margins: np.ndarray, *,
+                   threshold: float, dists: list,
+                   ref: dict, cut: float, regions, per_arm: dict | None):
     """
-    Score and rank every arm on rare-failure yield.
+    One arm's ArmScore, plus the masks the per-seed counts need.
 
-    Parameters
-    ----------
-    clouds       : {label: (theta (M, d), margins (M,))} -- the pooled evaluated
-                   points, exactly what ``ComparisonResult.clouds`` holds.
-    lower, upper : the ODD bounds the campaign ran on. Recorded in the result so
-                   two rankings from different ODDs cannot be silently merged.
-    dists        : the ODD marginals (``scenario.param_distributions(lo, hi)``).
-    threshold    : failure threshold (margin < threshold).
-    cloud_seeds  : {label: (M,) seed per point}. Without it the ranking is
-                   descriptive only -- no paired test is possible.
-    regions      : optional RegionComparison, for the region columns.
-    per_arm      : optional per-arm stats dict, for p_fail and its usability.
-    metric       : the field of ArmScore to rank on.
+    Returns ``(score, finite_mask, rare_mask)``: the caller needs the masks to
+    split the rare failures per seed without recomputing the densities.
     """
-    lower = np.asarray(lower, float)
-    upper = np.asarray(upper, float)
-    ref = rarity_reference(dists, q=q, n=reference_n, seed=reference_seed)
-    cut = ref["log_f_cut"]
+    theta = np.asarray(theta, float)
+    margins = np.asarray(margins, float)
+    finite = np.isfinite(margins)
+    fail = finite & (margins < threshold)
+    n_points = int(finite.sum())
 
-    scores: list = []
-    per_seed_rare: dict = {}
+    logf = odd_log_density(theta, dists)
+    rare = fail & (logf <= cut)
+    pct = odd_percentile(logf[fail], ref) if fail.any() else np.array([])
+
+    stats_arm = (per_arm or {}).get(label, {})
+    score = ArmScore(
+        label=label,
+        n_points=n_points,
+        n_failures=int(fail.sum()),
+        n_rare=int(rare.sum()),
+        failures_per_100=float(100.0 * fail.sum() / n_points) if n_points else 0.0,
+        rare_per_100=float(100.0 * rare.sum() / n_points) if n_points else 0.0,
+        worst_margin=float(np.nanmin(margins)) if finite.any() else float("nan"),
+        margin_q05=(float(np.nanpercentile(margins[finite], 5))
+                    if finite.any() else float("nan")),
+        median_odd_pct=float(np.median(pct)) if pct.size else float("nan"),
+        n_regions=len(regions.discovery.get(label, ())) if regions else 0,
+        n_exclusive_regions=(len(regions.exclusive_regions(label))
+                             if regions else 0),
+        p_fail=float(stats_arm.get("mean_p_fail", float("nan"))),
+        p_fail_usable=bool(stats_arm.get("p_fail_usable", True)),
+    )
+    return score, finite, rare
+
+
+def _rare_rate_per_seed(finite, rare, seeds) -> dict:
+    """`rare_per_100` restricted to each seed: the unit of the paired test."""
+    seeds = np.asarray(seeds)
+    return {
+        int(s): float(100.0 * (rare & (seeds == s)).sum()
+                      / max(int((finite & (seeds == s)).sum()), 1))
+        for s in np.unique(seeds)}
+
+
+def _all_pairs_paired_test(scores: list, per_seed_metric: dict) -> tuple:
+    """
+    Every pair of arms compared seed by seed, then Holm-corrected.
+
+    Returns ``(pairwise, n_seeds)``. `n_seeds` counts the seeds the arms have in
+    common: pairing on seeds only one arm ran would compare different designs.
+    """
+    if len(per_seed_metric) < 2:
+        return {}, 0
+
+    common = set.intersection(*[set(v) for v in per_seed_metric.values()])
+    n_seeds = len(common)
+    if n_seeds < 2:
+        return {}, n_seeds
+
+    order = sorted(common)
+    labels = [s.label for s in scores if s.label in per_seed_metric]
+    pairwise: dict = {}
+    for i, la in enumerate(labels):
+        for lb in labels[i + 1:]:
+            a = np.array([per_seed_metric[la][s] for s in order])
+            b = np.array([per_seed_metric[lb][s] for s in order])
+            wins, n, p = _paired_pvalue(a, b)
+            pairwise[f"{la} vs {lb}"] = {
+                "wins": wins, "n": n, "p_value": p,
+                "mean_a": float(a.mean()), "mean_b": float(b.mean())}
+    _holm(pairwise)
+    return pairwise, n_seeds
+
+
+def _ranking_notes(scores: list, pairwise: dict, n_seeds: int) -> list:
+    """
+    The notes attached to the ranking.
+
+    Covers three cases: no paired test was possible (distinguishing "one seed"
+    from "no per-seed provenance in the file"), no arm produced any failure at
+    all, and arms whose P(fail) estimate is out of its validity regime.
+    """
     notes: list = []
 
-    for label, (theta, margins) in clouds.items():
-        theta = np.asarray(theta, float)
-        margins = np.asarray(margins, float)
-        finite = np.isfinite(margins)
-        fail = finite & (margins < threshold)
-        n_points = int(finite.sum())
-
-        logf = odd_log_density(theta, dists)
-        rare = fail & (logf <= cut)
-        pct = odd_percentile(logf[fail], ref) if fail.any() else np.array([])
-
-        stats_arm = (per_arm or {}).get(label, {})
-        scores.append(ArmScore(
-            label=label,
-            n_points=n_points,
-            n_failures=int(fail.sum()),
-            n_rare=int(rare.sum()),
-            failures_per_100=float(100.0 * fail.sum() / n_points) if n_points else 0.0,
-            rare_per_100=float(100.0 * rare.sum() / n_points) if n_points else 0.0,
-            worst_margin=float(np.nanmin(margins)) if finite.any() else float("nan"),
-            margin_q05=(float(np.nanpercentile(margins[finite], 5))
-                        if finite.any() else float("nan")),
-            median_odd_pct=float(np.median(pct)) if pct.size else float("nan"),
-            n_regions=len(regions.discovery.get(label, ())) if regions else 0,
-            n_exclusive_regions=(len(regions.exclusive_regions(label))
-                                 if regions else 0),
-            p_fail=float(stats_arm.get("mean_p_fail", float("nan"))),
-            p_fail_usable=bool(stats_arm.get("p_fail_usable", True)),
-        ))
-
-        # Per-seed rare counts, for the paired test.
-        sd = (cloud_seeds or {}).get(label)
-        if sd is not None and len(sd) == len(margins):
-            sd = np.asarray(sd)
-            per_seed_rare[label] = {
-                int(s): float(100.0 * (rare & (sd == s)).sum()
-                              / max(int((finite & (sd == s)).sum()), 1))
-                for s in np.unique(sd)}
-
-    scores.sort(key=lambda s: getattr(s, metric), reverse=True)
-
-    # ── all-pairs paired comparison ────────────────────────────────────────
-    pairwise: dict = {}
-    n_seeds = 0
-    if len(per_seed_rare) >= 2:
-        common = set.intersection(*[set(v) for v in per_seed_rare.values()])
-        n_seeds = len(common)
-        if n_seeds >= 2:
-            order = sorted(common)
-            labels = [s.label for s in scores if s.label in per_seed_rare]
-            for i, la in enumerate(labels):
-                for lb in labels[i + 1:]:
-                    a = np.array([per_seed_rare[la][s] for s in order])
-                    b = np.array([per_seed_rare[lb][s] for s in order])
-                    wins, n, p = _paired_pvalue(a, b)
-                    pairwise[f"{la} vs {lb}"] = {
-                        "wins": wins, "n": n, "p_value": p,
-                        "mean_a": float(a.mean()), "mean_b": float(b.mean())}
-            _holm(pairwise)
-    # An empty `pairwise` has two very different causes, and saying the wrong
-    # one sends the reader to fix the wrong thing: a campaign that recorded no
-    # provenance has to be RE-RUN, while a campaign with one seed only needs
-    # more seeds. Same failure mode this module guards against elsewhere --
-    # reporting the absence of a measurement as a measured absence.
     if not pairwise:
         if n_seeds < 2:
             notes.append(
@@ -406,8 +405,8 @@ def rank_arms(clouds: dict, lower, upper, dists, *, threshold: float = 0.0,
                 "provenance (campaigns saved before seeds_<i> was added to the .npz). "
                 "The ranking is a description of the pooled clouds.")
 
-    # A leaderboard of zeros is not a leaderboard. Say it once, loudly, instead
-    # of letting six identical rows and a column of nan read as a close race.
+    # No failures anywhere: the order of the table is arbitrary and every
+    # p-value is undefined, so the note goes first.
     if not any(s.n_failures for s in scores):
         notes.insert(0,
             "NO ARM PRODUCED A SINGLE FAILURE in this campaign "
@@ -423,22 +422,66 @@ def rank_arms(clouds: dict, lower, upper, dists, *, threshold: float = 0.0,
             " at this budget; those arms are ranked on what they FOUND, which is "
             "unaffected, and their probability estimates are excluded.")
 
+    return notes
+
+
+def rank_arms(clouds: dict, lower: np.ndarray, upper: np.ndarray, dists: list,
+              *, threshold: float = 0.0,
+              cloud_seeds: dict | None = None, regions=None,
+              per_arm: dict | None = None, q: float = RARITY_Q,
+              reference_n: int = RARITY_REFERENCE_N, reference_seed: int = 12345,
+              metric: str = "rare_per_100") -> ArmRanking:
+    """
+    Score and rank every arm on rare-failure yield.
+
+    Parameters
+    ----------
+    clouds       : {label: (theta (M, d), margins (M,))} -- the pooled evaluated
+                   points, exactly what ``ComparisonResult.clouds`` holds.
+    lower, upper : the ODD bounds the campaign ran on, recorded in the result.
+    dists        : the ODD marginals (``scenario.param_distributions(lo, hi)``).
+    threshold    : failure threshold (margin < threshold).
+    cloud_seeds  : {label: (M,) seed per point}. Without it no paired test runs
+                   and the ranking carries a note saying so.
+    regions      : optional RegionComparison, for the region columns.
+    per_arm      : optional per-arm stats dict, for p_fail and its usability.
+    metric       : the field of ArmScore to rank on.
+    """
+    lower = np.asarray(lower, float)
+    upper = np.asarray(upper, float)
+    ref = rarity_reference(dists, q=q, n=reference_n, seed=reference_seed)
+    cut = ref["log_f_cut"]
+
+    scores: list = []
+    per_seed_rare: dict = {}
+    for label, (theta, margins) in clouds.items():
+        score, finite, rare = _score_one_arm(
+            label, theta, margins, threshold=threshold, dists=dists, ref=ref,
+            cut=cut, regions=regions, per_arm=per_arm)
+        scores.append(score)
+
+        seeds = (cloud_seeds or {}).get(label)
+        if seeds is not None and len(seeds) == len(np.asarray(margins, float)):
+            per_seed_rare[label] = _rare_rate_per_seed(finite, rare, seeds)
+
+    scores.sort(key=lambda s: getattr(s, metric), reverse=True)
+    pairwise, n_seeds = _all_pairs_paired_test(scores, per_seed_rare)
+
     return ArmRanking(
         scores=scores, metric=metric, rarity=ref,
         bounds={"lower": lower.tolist(), "upper": upper.tolist()},
         pairwise=pairwise, per_seed_metric=per_seed_rare, n_seeds=n_seeds,
         min_attainable_p=(2.0 / 2 ** n_seeds) if n_seeds else float("nan"),
-        notes=notes)
+        notes=_ranking_notes(scores, pairwise, n_seeds))
 
 
 def compare_rankings(a: ArmRanking, b: ArmRanking, *, name_a: str = "A",
                      name_b: str = "B") -> str:
     """
-    Put two campaigns' leaderboards side by side -- but only when they ran on
-    the same ODD. Rarity is defined relative to the operational distribution, so
-    an arm scored against a narrow ODD and one scored against a wide ODD are not
-    measuring the same thing, and averaging or ranking them together produces a
-    number with no referent.
+    Put two campaigns' leaderboards side by side.
+
+    Raises when the two rankings were calibrated on different ODD bounds, since
+    the rarity cut is defined relative to the operational distribution.
     """
     if a.bounds != b.bounds:
         raise ValueError(
@@ -510,16 +553,72 @@ def load_plan(path: str) -> dict:
     return plan
 
 
+def _one_sided_p(p_two: float, wins: int, n: int, direction: str) -> tuple:
+    """
+    The p for one hypothesis, and whether the effect went in the declared direction.
+
+    A two-sided hypothesis keeps the two-sided p. A one-sided one halves it when
+    the observed direction matches the declaration, and returns 1.0 otherwise.
+    """
+    if direction == "two-sided":
+        return float(p_two), True
+    correct_way = (wins > n - wins) if direction == "a>b" else (wins < n - wins)
+    return (float(p_two / 2.0) if correct_way else 1.0), bool(correct_way)
+
+
+def _test_one_hypothesis(h: dict, per_seed: dict, alpha: float) -> dict:
+    """
+    One hypothesis of the pre-registered plan, tested paired by seed.
+
+    The returned row always carries an ``outcome``; ``stop`` says whether the
+    sequence must halt here.
+    """
+    row = {"id": h["id"], "a": h["a"], "b": h["b"],
+           "direction": h["direction"],
+           "rationale": h.get("rationale", "")}
+
+    if h["a"] not in per_seed or h["b"] not in per_seed:
+        row["outcome"] = "not tested (an arm has no per-seed values)"
+        return {"row": row, "stop": True}
+
+    seeds = sorted(set(per_seed[h["a"]]) & set(per_seed[h["b"]]))
+    a = np.array([per_seed[h["a"]][s] for s in seeds], float)
+    b = np.array([per_seed[h["b"]][s] for s in seeds], float)
+
+    if not np.any(a) and not np.any(b):
+        # Both arms identically zero on this metric: there is nothing to test,
+        # so the hypothesis is marked VOID and the sequence stops.
+        row["outcome"] = ("VOID — both arms are identically zero on this "
+                          "metric; the campaign produced nothing to test")
+        row.update({"n": len(seeds), "wins_a": 0, "mean_a": 0.0, "mean_b": 0.0})
+        return {"row": row, "stop": True, "void": True}
+
+    wins, n, p_two = _paired_pvalue(a, b)
+    row.update({"n": n, "wins_a": wins,
+                "mean_a": float(a.mean()), "mean_b": float(b.mean()),
+                "p_two_sided": p_two})
+
+    p, correct_way = _one_sided_p(p_two, wins, n, h["direction"])
+    row["p_value"] = float(p)
+    row["direction_observed_as_declared"] = correct_way
+
+    if np.isfinite(p) and p < alpha:
+        row["outcome"] = "REJECTED the null — the hypothesis holds"
+        return {"row": row, "stop": False}
+
+    row["outcome"] = ("failed — the sequence stops here" if correct_way
+                      else "failed: the effect goes the OTHER way")
+    return {"row": row, "stop": True}
+
+
 def fixed_sequence_test(ranking: ArmRanking, plan: dict) -> dict:
     """
     Execute a pre-registered ordered sequence of pairwise hypotheses.
 
-    Each is tested at the full ``alpha``; the sequence stops at the first
-    hypothesis that fails, and everything after it is reported as untested --
-    not as a null result, which it is not.
+    Each hypothesis is tested at the full ``alpha``. The sequence stops at the
+    first one that does not reject, and the remaining entries are reported with
+    an outcome of "not tested".
     """
-    from scipy import stats
-
     alpha = float(plan["alpha"])
     per_seed = ranking.per_seed_metric
     out = {"alpha": alpha, "metric": ranking.metric,
@@ -529,64 +628,21 @@ def fixed_sequence_test(ranking: ArmRanking, plan: dict) -> dict:
 
     stopped = False
     for h in plan["hypotheses"]:
-        row = {"id": h["id"], "a": h["a"], "b": h["b"],
-               "direction": h["direction"],
-               "rationale": h.get("rationale", "")}
         if stopped:
-            row["outcome"] = "not tested (the sequence stopped earlier)"
-            out["results"].append(row)
-            continue
-        if h["a"] not in per_seed or h["b"] not in per_seed:
-            row["outcome"] = "not tested (an arm has no per-seed values)"
-            out["results"].append(row)
-            stopped = True
-            out["stopped_at"] = h["id"]
+            out["results"].append(
+                {"id": h["id"], "a": h["a"], "b": h["b"],
+                 "direction": h["direction"],
+                 "rationale": h.get("rationale", ""),
+                 "outcome": "not tested (the sequence stopped earlier)"})
             continue
 
-        seeds = sorted(set(per_seed[h["a"]]) & set(per_seed[h["b"]]))
-        a = np.array([per_seed[h["a"]][s] for s in seeds], float)
-        b = np.array([per_seed[h["b"]][s] for s in seeds], float)
-        if not np.any(a) and not np.any(b):
-            # Both arms are identically zero. That is not evidence against the
-            # hypothesis -- it is a campaign with no data in it, and calling it
-            # "the effect goes the other way" would be a false negative dressed
-            # up as a finding.
-            row["outcome"] = ("VOID — both arms are identically zero on this "
-                              "metric; the campaign produced nothing to test")
-            row.update({"n": len(seeds), "wins_a": 0,
-                        "mean_a": 0.0, "mean_b": 0.0})
-            out["results"].append(row)
-            stopped = True
-            out["stopped_at"] = h["id"]
+        res = _test_one_hypothesis(h, per_seed, alpha)
+        out["results"].append(res["row"])
+        if res.get("void"):
             out["void"] = True
-            continue
-        wins, n, p_two = _paired_pvalue(a, b)
-        row.update({"n": n, "wins_a": wins,
-                    "mean_a": float(a.mean()), "mean_b": float(b.mean()),
-                    "p_two_sided": p_two})
-
-        if h["direction"] == "two-sided":
-            p = p_two
-            correct_way = True
-        else:
-            # One-sided at alpha is the two-sided p halved, and only when the
-            # observed direction is the declared one. A result in the opposite
-            # direction is a failure of the hypothesis, however large it is.
-            correct_way = (wins > n - wins) if h["direction"] == "a>b" \
-                else (wins < n - wins)
-            p = (p_two / 2.0) if correct_way else 1.0
-        row["p_value"] = float(p)
-        row["direction_observed_as_declared"] = bool(correct_way)
-
-        if np.isfinite(p) and p < alpha:
-            row["outcome"] = "REJECTED the null — the hypothesis holds"
-        else:
-            row["outcome"] = ("failed — the sequence stops here"
-                              if correct_way else
-                              "failed: the effect goes the OTHER way")
+        if res["stop"]:
             stopped = True
             out["stopped_at"] = h["id"]
-        out["results"].append(row)
     return out
 
 

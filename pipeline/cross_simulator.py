@@ -1,53 +1,32 @@
 """
-Confronto cross-simulatore: Udacity ↔ MetaDrive ↔ CARLA.
+Cross-simulator comparison: Udacity, MetaDrive, CARLA.
 
-The problem this class solves
------------------------------
-Comparing two backends is NOT comparing their failure rates. Changing the
-simulator changes three things at once:
+The backends do not share a Python environment (Udacity runs on Python 3.8
+inside Docker, MetaDrive on a local Python <3.12, CARLA on Python 3.8 in its own
+container), so this module never calls a backend: each campaign is saved to a
+JSON file by `scripts/run_cross_simulator.py collect`, and the class here reads
+those files back.
 
-    (a) how hard the simulator is  -- geometry, vehicle dynamics, control rate
-    (b) how good the controller is -- the same controller is not equally good
-    (c) the operating point        -- the backends are tuned to different `speed_scale`
+What it computes from a pair of campaigns:
 
-A higher rate on one backend cannot be attributed to any of the three. The
-metrics here are chosen because they **survive** an offset in difficulty:
-
-  1. **Spearman on the QoI** -- do the two backends agree on WHICH scenarios
-     are hard? Independent of the QoI scale and of the absolute rate. It is
-     the most informative number about the relation between two backends.
-  2. **Failure-region overlap** -- delegated to
-     `pipeline.failure_regions.compare_failure_regions`, which is already
-     label-agnostic: it takes `{label: (theta, margins)}` and does not know
-     whether the labels are search methods or simulators.
-  3. **Failure rate** -- reported for completeness, with its `speed_scale`
-     next to it, and flagged as NOT comparable.
-
-Structural constraint: the work happens on FILES
-------------------------------------------------
-The backends do not share a Python environment:
-
-    Udacity    Python 3.8 inside Docker (gym, tensorflow 2.9)
-    MetaDrive  Python <3.12 in locale (gymnasium)
-    CARLA      Python 3.8 in container + GPU
-
-So the comparison cannot call the backends in-process: each one saves its own
-result and this class reads them back. It is also more robust -- campaigns run
-for hours and you do not want to lose them to a bug in the comparison.
-
-The shared design
------------------
-Spearman requires that both backends evaluated **the same thetas**. If the
-designs differ the correlation is meaningless: it correlates scenario i of A
-with scenario i of B, which are different scenarios. The class checks this and
-REFUSES to compute it, rather than returning a number that says nothing.
+  1. Spearman rank correlation between the two QoI vectors -- whether the
+     backends order the same scenarios by difficulty in the same way. It is
+     computed only if both campaigns evaluated the same thetas: the class
+     compares the two designs and raises instead of returning a correlation
+     between mismatched scenarios.
+  2. Failure-region overlap, delegated to
+     `pipeline.region_comparison.compare_failure_regions`, which takes
+     `{label: (theta, margins)}` and is agnostic to what the labels mean.
+  3. The failure rate of each backend, reported next to the `speed_scale` it was
+     collected at. The backends are calibrated to different `speed_scale`
+     values, so these rates are labelled as not comparable across backends.
 """
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -94,7 +73,9 @@ class BackendRun:
 
     @property
     def failure_rate(self) -> float:
-        """NaN when no run is valid: not 0, which would read as 'never failed'."""
+        """
+        Fraction of valid runs that failed, or NaN when no run is valid.
+        """
         if self.n_valid == 0:
             return float("nan")
         return float((self.qoi[self.valid] < self.threshold).mean())
@@ -227,12 +208,11 @@ class CrossSimulatorComparison:
 
     def _same_design(self, a: BackendRun, b: BackendRun) -> bool:
         """
-        Did the two backends evaluate the same thetas?
+    True when the two backends evaluated the same thetas, in the same order.
 
-        A necessary condition for Spearman: without it, scenario i of A would be
-        correlated with scenario i of B, which are DIFFERENT scenarios. The
-        resulting number looks like a correlation but is not one.
-        """
+    Spearman on the QoIs pairs scenario i of A with scenario i of B, so the
+    correlation is only defined when the designs match.
+    """
         if a.theta.shape != b.theta.shape:
             return False
         return bool(np.max(np.abs(a.theta - b.theta)) <= self.DESIGN_TOLERANCE)
@@ -302,16 +282,16 @@ class CrossSimulatorComparison:
                 outcome.spearman[key] = float(rho)
                 outcome.spearman_p[key] = float(p)
 
-    def _failure_regions(self, outcome, lower, upper, param_names, dists, tau) -> None:
+    def _failure_regions(self, outcome, lower: np.ndarray, upper: np.ndarray,
+                         param_names: list, dists: list, tau: float) -> None:
         """
-        Delegates to `compare_failure_regions`, which takes `{label: (theta, margins)}`
-        and does not know whether the labels are methods or simulators: already generic.
+    Failure regions of the two backends, from `compare_failure_regions`.
 
-        `eps=None` is not optional: the module documents that a DBSCAN radius
-        tuned in 2-D declares every point isolated in 9-D, and the comparison
-        would return Jaccard 0 everywhere as an artefact rather than a result.
-        """
-        from pipeline.failure_regions import compare_failure_regions
+    That function takes `{label: (theta, margins)}` and is indifferent to whether
+    the labels are methods or simulators. `eps=None` leaves the DBSCAN radius to
+    be estimated from the pooled cloud.
+    """
+        from pipeline.region_comparison import compare_failure_regions
 
         runs = {r.backend: (r.theta, r.qoi) for r in self.results}
         if all(len(r.theta_failed) == 0 for r in self.results):
@@ -480,7 +460,7 @@ class CrossSimulatorComparison:
         lines.append("=" * 72)
         return "\n".join(lines)
 
-    def report_regioni(self) -> str:
+    def report_regions(self) -> str:
         """Detailed `compare_failure_regions` report, when available."""
         if self._regions is None:
             return "(no region analysis available)"

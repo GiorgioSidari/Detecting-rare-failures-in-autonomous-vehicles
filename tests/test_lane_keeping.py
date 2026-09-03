@@ -67,8 +67,8 @@ def run_and_report(sc, label, params, param_names):
     for name, val in zip(param_names, params[0]):
         print(f"  {name:<22} = {val:.1f}")
 
-    # Simulazione
-    print(f"\n⏳ Invio simulazione a {sc.simulator_url}...")
+    # Simulation
+    print(f"\n⏳ Sending the simulation to {sc.simulator_url}...")
     traj = sc.run_simulation(params)
 
     run_len = sc._run_lengths[0]
@@ -79,14 +79,14 @@ def run_and_report(sc, label, params, param_names):
     y       = traj[0, :run_len, 1]
 
     # Traiettoria
-    print(f"\nTraiettoria:")
+    print("\nTraiettoria:")
     print(f"  Step totali (run reale):  {run_len}")
-    print(f"  Step terminati in anticipo: {'Sì — XTE > limit' if run_len < T_max else 'No — run completo'}")
+    print(f"  Steps ended early: {'yes — XTE > limit' if run_len < T_max else 'No — run completo'}")
     print(f"  Distanza percorsa:  X {x[0]:.1f}m → {x[-1]:.1f}m  (Δ {x[-1]-x[0]:.1f}m)")
     print(f"  Deriva laterale:    Y {y[0]:.4f}m → {y[-1]:.4f}m")
 
     # XTE
-    print(f"\nCross-Track Error (XTE) — distanza dal centro corsia:")
+    print("\nCross-Track Error (XTE) — distanza dal centro corsia:")
     print(f"  Max |XTE|:   {np.abs(xte).max():.4f}m   (limit = {MAX_XTE}m)")
     print(f"  Media |XTE|: {np.abs(xte).mean():.4f}m")
     print(f"  Soglia M3:   {EARLY_FRAC * MAX_XTE:.4f}m  ({EARLY_FRAC*100:.0f}% del limit)")
@@ -94,7 +94,7 @@ def run_and_report(sc, label, params, param_names):
     print(f"  Step vicino al bordo: {near_steps} / {run_len}  ({near_steps/run_len*100:.1f}%)")
 
     # Sterzo
-    print(f"\nSterzo (steering):")
+    print("\nSterzo (steering):")
     print(f"  Media:       {steer.mean():.4f}")
     steer_peak_val = np.abs(steer).max() - np.abs(steer).mean()
     print(f"  Std dev:     {steer.std():.4f}")
@@ -103,7 +103,7 @@ def run_and_report(sc, label, params, param_names):
 
     # QoI
     m1, m2, m3, qoi = compute_qoi_components(sc, traj, params)
-    print(f"\nQoI composita:")
+    print("\nQoI composita:")
     print(f"  M1 (weight 0.6) -- XTE margin:      {m1[0]:+.4f}   (MAX_XTE - max|XTE|)")
     print(f"  M2 (weight 0.2) -- steering peak:   {m2[0]:+.4f}   (-(max|s|-mean|s|)/STEER_RANGE_NORM)")
     print(f"  M3 (weight 0.2) -- edge approach:   {m3[0]:+.4f}   (0=never; -1=at once)")

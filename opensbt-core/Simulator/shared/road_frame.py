@@ -1,41 +1,26 @@
 """
-Lateral and heading error from the centreline -- one computation for every backend.
+Lateral and heading error from the centreline, computed the same way everywhere.
 
-Why this exists
----------------
-The C2 arm of the comparison protocol is "the same controller on different
-simulators". But a controller is only identical if it receives the same *input*,
-and the input of a state-based lane keeper is the pair (lateral error, heading
-error). If each backend computes it its own way, C2 no longer isolates the
-effect of the simulator: it also folds in the difference between competing
-definitions of "how far off the road I am".
+The vehicle position is projected onto the road polyline -- the same polyline
+`road_geometry.road_polyline` generates from the 9 scenario parameters -- and
+both errors are derived from that single projection, so every backend feeds the
+controller the same quantities.
 
-Left to themselves, the backends would compute it in different ways:
+The alternative sources differ between backends and are not used here: Udacity's
+telemetry exposes `cte` but no lane tangent, so the heading error is missing,
+and MetaDrive's `vehicle.lane` has its own projection API with the opposite sign
+convention. On Udacity the telemetry `cte` is instead compared against this
+computation as an independent check (see
+`tests/test_road_frame.py::test_agrees_with_the_udacity_cte`).
 
-  * **Udacity** exposes `cte` in the telemetry (computed by Unity), but does
-    **not expose the lane tangent**, so the heading error is simply missing;
-  * **MetaDrive** has `vehicle.lane` with its own projection API.
-
-This module replaces both: it projects the vehicle position onto the road
-polyline -- which we **know**, because we generate it ourselves with
-`road_geometry.road_polyline` from the same 9 parameters -- and derives both
-errors from a single definition.
-
-Side benefit: on Udacity the telemetry `cte` becomes an **independent
-reference**. If our lateral error matches what Unity reports, the whole
-geometric chain (road generation -> polyline -> projection) is validated against
-the simulator. See
-`tests/test_road_frame.py::test_agrees_with_the_udacity_cte`.
-
-Convenzioni
+Conventions
 -----------
     lateral_error > 0  ->  vehicle LEFT of the centreline
     heading_error > 0  ->  vehicle rotated counter-clockwise from the tangent
 
-Consistent with `lane_keeping_md/driver.py`: a positive lateral error must
-produce negative steering (to the right).
-
-No dependency beyond numpy. No simulator imports.
+`RoadFrame` also carries `beyond_end` and `before_start`, true when the
+projection clamps to the last or first vertex, i.e. when the vehicle is outside
+the extent of the road and the lateral error is no longer a lateral error.
 """
 from __future__ import annotations
 
@@ -91,8 +76,8 @@ def project_to_polyline(xy: np.ndarray, px: float, py: float) -> Tuple[int, floa
         `t` in [0, 1] is the position along the segment, `distance` is the
         Euclidean (unsigned) one.
 
-    The projection is onto the nearest SEGMENT, not the nearest vertex: with
-    different samplings the nearest vertex jumps around, the segment does not.
+    The projection is onto the nearest SEGMENT, not the nearest vertex, so the
+    result does not depend on how densely the polyline is sampled.
     """
     xy = np.asarray(xy, dtype=float)
     if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 2:
@@ -136,7 +121,7 @@ def road_frame(xy: np.ndarray, px: float, py: float, yaw_rad: float) -> RoadFram
     tx, ty = bx - ax, by - ay
     norm = math.hypot(tx, ty)
     if norm < 1e-12:
-        raise ValueError(f"segmento degenere all'indice {i}")
+        raise ValueError(f"degenerate segment at index {i}")
     tx, ty = tx / norm, ty / norm
 
     projx, projy = ax + t * (bx - ax), ay + t * (by - ay)
@@ -167,17 +152,14 @@ def yaw_from_positions(prev_xy: Tuple[float, float],
     """
     Heading estimated from two consecutive positions.
 
-    Needed on Udacity, whose telemetry exposes the position but **not the
-    attitude**. Same idea as `agent/agent_utils.calc_yaw_ego`, but in radians
-    and with explicit handling of the "vehicle stopped" case: at zero speed the
-    displacement is noise and the estimated heading would be random, so the last
-    valid value is kept (`fallback`).
+    Returns the angle of the displacement vector, in radians. When the
+    displacement is shorter than the minimum distance (the vehicle is stopped or
+    nearly so) the displacement direction is noise, and `fallback` is returned
+    instead.
 
-    A limit worth declaring: this is the heading of the TRAJECTORY, not of the
-    vehicle's attitude. They coincide only without slip. At the speeds of this
-    scenario the difference is small, but it is a difference between the C2 arm
-    on Udacity and the one on MetaDrive, where the attitude is directly
-    available.
+    The value is the heading of the trajectory, which equals the vehicle's
+    attitude only in the absence of slip. It is used on backends whose telemetry
+    exposes the position but not the attitude.
     """
     dx = curr_xy[0] - prev_xy[0]
     dy = curr_xy[1] - prev_xy[1]

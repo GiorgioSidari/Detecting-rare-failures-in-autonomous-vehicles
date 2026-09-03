@@ -1,48 +1,41 @@
 #!/usr/bin/env python3
 """
-Confronto cross-simulatore — Udacity ↔ MetaDrive.
+Cross-simulator comparison -- Udacity vs MetaDrive.
 
-Two modes of use, because the backends do not share a Python environment.
+The two backends do not share a Python environment, so the script has two
+subcommands and each campaign is collected separately.
 
 1) COLLECT -- run a campaign on ONE backend and save the result
 ---------------------------------------------------------------
-   To be launched in the right environment for that backend:
+   Launched in the environment of that backend:
 
        # MetaDrive (venv with Python <3.12)
-       python scripts/run_cross_simulator.py collect lane_keeping_md \\
+       python scripts/run_cross_simulator.py collect lane_keeping_md \
               --n 60 --speed-scale 0.1766
 
-       # Udacity (C2 containers up, NUM_WORKERS=1)
-       python scripts/run_cross_simulator.py collect lane_keeping \\
+       # Udacity (containers up, NUM_WORKERS=1)
+       python scripts/run_cross_simulator.py collect lane_keeping \
               --n 60 --speed-scale 0.42
 
-   **The same `--seed` on every backend.** The LHS design must be identical,
-   otherwise the rank correlation cannot be computed: it would correlate
-   scenario i of A with scenario i of B, which are different scenarios. The
-   comparison step checks this and refuses to produce the number.
+   `--seed` must be the same on every backend: it selects the LHS design, and
+   the comparison pairs scenario i of one backend with scenario i of the other.
+   The compare step verifies that the designs match and aborts if they do not.
 
 2) COMPARE -- read the files back and produce the comparison
 ------------------------------------------------------------
-       python scripts/run_cross_simulator.py compare \\
-              results/cross_lane_keeping_md.json \\
+       python scripts/run_cross_simulator.py compare \
+              results/cross_lane_keeping_md.json \
               results/cross_lane_keeping.json
 
-   This step does not touch the simulators, so it runs in any environment.
+   This step reads only the saved JSON files and runs no simulation.
 
-What to expect from the numbers
--------------------------------
-The failure rate is NOT the metric of the comparison: the backends are tuned to
-different `speed_scale`, so the rates are not comparable by construction. They
-only serve to check that neither is degenerate.
+The comparison reports:
 
-The real metrics are two:
-
-  * **Spearman on the QoI** -- do the simulators agree on WHICH scenarios are
-    hard? Invariant to an offset in difficulty.
-  * **Failure-region overlap** -- a low Jaccard with many failures on both sides
-    means the two simulators expose disjoint regions, i.e. that testing only one
-    leaves part of the domain uncovered. It is the most interesting result the
-    campaign can produce.
+  * the failure rate of each backend, as a check that neither campaign is
+    degenerate (all or nothing);
+  * the Spearman rank correlation between the two QoI vectors, i.e. whether the
+    backends order the scenarios by difficulty in the same way;
+  * the Jaccard overlap of the failure regions found on each side.
 """
 from __future__ import annotations
 
@@ -186,7 +179,7 @@ def _compare(args) -> int:
 
     if args.regions:
         print()
-        print(cmp.report_regioni())
+        print(cmp.report_regions())
 
     out = args.out or os.path.join(_PROJECT_ROOT, "results", "confronto_cross.json")
     outcome.save(out)
@@ -194,7 +187,7 @@ def _compare(args) -> int:
     return 0
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -205,13 +198,13 @@ def main() -> int:
     r.add_argument("--seed", type=int, default=42,
                    help="MUST be the same on every backend")
     r.add_argument("--speed-scale", type=float, default=1.0, dest="speed_scale",
-                   help="punto operativo tarato (vedi calibrate_operating_point.py)")
+                   help="calibrated operating point (see calibrate_operating_point.py)")
     r.add_argument("--out", default=None)
     r.add_argument("--note", default=None)
     r.add_argument("-v", "--verbose", action="store_true")
     r.set_defaults(func=_collect)
 
-    c = sub.add_parser("compare", help="rilegge i file e confronta")
+    c = sub.add_parser("compare", help="read the files back and compare them")
     c.add_argument("file", nargs="+", help="two or more result JSON files")
     c.add_argument("--regions", action="store_true",
                    help="also print the detailed region report")
@@ -220,6 +213,11 @@ def main() -> int:
     c.add_argument("--out", default=None)
     c.set_defaults(func=_compare)
 
+    return ap
+
+
+def main() -> int:
+    ap = _build_parser()
     args = ap.parse_args()
     return args.func(args)
 

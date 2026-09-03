@@ -1,30 +1,22 @@
 """
-Sampling strategies, shared by every pipeline module.
+Sampling designs behind one interface, shared by every pipeline module.
 
-Why this module exists
-----------------------
-The pipeline currently seeds its exploration with a Latin Hypercube (LHS): a
-*stratified* design that guarantees every 1-D projection of the parameter space
-is covered exactly once per stratum. The claim we want to validate empirically
-is that stratification is what lets the search reach the rare failure regions:
-plain uniform random sampling leaves holes, and with a small simulation budget
-those holes are exactly where the rare failures hide.
-
-To test that claim we need the two designs behind one interface, so that the
-*algorithm* (active boundary, cross-entropy) stays byte-for-byte identical and
-the *only* thing that changes is how points are drawn. That is what
-:class:`BaseSampler` provides.
+Two designs are available. **LHS** (Latin Hypercube) is stratified: to draw n
+points it splits each axis into n equiprobable strata and takes exactly one
+value per stratum, permuting the strata independently across axes. **random**
+draws i.i.d. uniform points. Both expose the same three helpers, so an algorithm
+can be run under either design without changing a line of it.
 
     from pipeline.samplers import get_sampler
     s = get_sampler("lhs")        # stratified
-    s = get_sampler("random")     # plain uniform random search
+    s = get_sampler("random")     # i.i.d. uniform
 
     u     = s.unit(n=64, d=9, seed=0)                 # (64, 9) in [0, 1)
     theta = s.bounded(64, lower, upper, seed=0)       # scaled to the bounds
-    theta = s.from_dists(64, dists, seed=0)           # ppf of the ODD (realistic)
+    theta = s.from_dists(64, dists, seed=0)           # through the ODD marginals
 
-All three helpers take an explicit ``seed`` so a run is reproducible, and so a
-multi-seed comparison can vary only the seed while keeping everything else fixed.
+All three take an explicit ``seed``, so a run is reproducible and a multi-seed
+comparison can vary the seed alone.
 """
 from __future__ import annotations
 
@@ -42,9 +34,9 @@ class BaseSampler(ABC):
     """
     A design of experiments over the d-dimensional unit cube.
 
-    Subclasses only implement :meth:`unit`; the mapping to physical bounds
-    (:meth:`bounded`) and to the operational distribution (:meth:`from_dists`)
-    is shared, which is what keeps the LHS/random comparison honest.
+    Subclasses implement :meth:`unit` only; the mapping to physical bounds
+    (:meth:`bounded`) and through the operational marginals (:meth:`from_dists`)
+    is shared by every design.
     """
 
     name: str = "base"
@@ -54,13 +46,14 @@ class BaseSampler(ABC):
     def unit(self, n: int, d: int, seed: int | None = None) -> np.ndarray:
         """Return (n, d) points in [0, 1)."""
 
-    def bounded(self, n: int, lower, upper, seed: int | None = None) -> np.ndarray:
+    def bounded(self, n: int, lower: np.ndarray, upper: np.ndarray,
+                seed: int | None = None) -> np.ndarray:
         """(n, d) points linearly scaled onto [lower, upper] — a uniform ODD."""
         lower = np.asarray(lower, dtype=float)
         upper = np.asarray(upper, dtype=float)
         return scale(self.unit(n, len(lower), seed), lower, upper)
 
-    def from_dists(self, n: int, dists, seed: int | None = None) -> np.ndarray:
+    def from_dists(self, n: int, dists: list, seed: int | None = None) -> np.ndarray:
         """
         (n, d) points drawn from a product of frozen scipy distributions via the
         inverse CDF — the "realistic" ODD mapping used by the orchestrator.

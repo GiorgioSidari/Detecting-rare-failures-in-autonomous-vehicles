@@ -30,10 +30,10 @@ if _PROJECT_ROOT not in sys.path:
 
 import numpy as np
 from scenarios.lane_keeping.config import LaneKeepingScenario
-from pipeline.rare_event import estimate_failure_probability, _sample_product
+from pipeline.rare_event import estimate_failure_probability, sample_product
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="M4 validation (Cross-Entropy vs brute force).")
     ap.add_argument("--reps", type=int, default=10, help="CE repetitions (seeds) (default 10)")
     ap.add_argument("--angle-thr", type=float, default=53.0,
@@ -45,6 +45,11 @@ def main() -> None:
     # CE budget (runs are free here, so generous values).
     ap.add_argument("--spi", type=int, default=500, help="CE samples_per_iter")
     ap.add_argument("--final", type=int, default=8000, help="final-estimate samples")
+    return ap
+
+
+def main() -> None:
+    ap = _build_parser()
     args = ap.parse_args()
 
     at, st = args.angle_thr, args.speed_thr
@@ -66,7 +71,7 @@ def main() -> None:
 
     # Ground truth.
     rng = np.random.default_rng(0)
-    T = _sample_product(f_dists, args.truth_n, rng, d)
+    T = sample_product(f_dists, args.truth_n, rng, d)
     p_true = float((margin_fn(T) < 0).mean())
     print(f" Synthetic rule (unimodal): mean(angles)>{at:g} AND max_speed>{st:g}")
     print(f" P_true (MC {args.truth_n:,}) = {p_true*100:.4f}%  ({p_true:.2e})")
@@ -92,7 +97,7 @@ def main() -> None:
 
     # Plain Monte Carlo at the SAME budget.
     B = mean_eval
-    mc_fails = (margin_fn(_sample_product(f_dists, B, np.random.default_rng(12345), d)) < 0)
+    mc_fails = (margin_fn(sample_product(f_dists, B, np.random.default_rng(12345), d)) < 0)
     k_mc = int(mc_fails.sum())
     p_mc = k_mc / B
     mc_relerr = float(np.sqrt(p_mc * (1 - p_mc) / B) / p_mc) if p_mc > 0 else float("inf")
